@@ -44,7 +44,7 @@ import { detectedSupervisor, restartAllowed, scheduleRestart, servingPort, trust
 import { activationAfterReplace, brokenClientBundles, checkClientBundle, hasHostHalf, newlyBrokenBundles, verifyActivation } from './verify.ts'
 import {
   carrierDisableIds, disableRow, enableRow, findUserPatchPath, isProtectedModule, packagePatchFlags,
-  readUserPatchState, removeRowBlocks, rowIdsForPackage,
+  readUserPatchState, removeRowBlocks, rowIdsForPackage, userPatchPackageReferences,
 } from './patch.ts'
 import {
   createProfileBackup, downloadWebdav, MAX_BACKUP_BYTES, mergeRestoreManifest, restoreProfileBackup, secretFileCount, unportableDeps, uploadWebdav,
@@ -2312,6 +2312,25 @@ export function mountMarketRoutes(
             }
             if (readInstalled(config.profile, activeProfileDir)[name] === undefined) {
               sendJson(response, 400, { error: 'plugin is not installed' })
+              return
+            }
+            const userPatchReferences = userPatchPackageReferences(userPatchPath, name)
+            if (userPatchReferences === null) {
+              logEvent('warn', 'uninstall-blocked', `${name}: user cordis.patch.yml could not be inspected safely`)
+              sendJson(response, 409, {
+                error: `无法安全卸载 ${name}：当前 profile 的 cordis.patch.yml 无法读取为有效的补丁列表，因此无法排除它仍在引用该包。请先检查补丁文件再重试。 / Cannot safely uninstall ${name}: this profile's cordis.patch.yml could not be read as a valid patch list, so the market cannot rule out a remaining package reference. Check the patch file and retry.`,
+                userPatchInspectionFailed: true,
+              })
+              return
+            }
+            if (userPatchReferences.length > 0) {
+              const listed = userPatchReferences.join(', ')
+              logEvent('warn', 'uninstall-blocked', `${name}: user cordis.patch.yml still inserts ${listed}`)
+              sendJson(response, 409, {
+                error: `无法卸载 ${name}：当前 profile 的 cordis.patch.yml 仍通过 insert 引用 ${listed}。请先移除这些用户补丁引用再重试；市场不会自动改写用户补丁。 / Cannot uninstall ${name}: this profile's cordis.patch.yml still inserts ${listed}. Remove those user-owned patch references first and retry; the market will not rewrite the user patch automatically.`,
+                userPatchReferenced: true,
+                patchReferences: userPatchReferences,
+              })
               return
             }
             const busyAgents = runningAgentsForGuard()
