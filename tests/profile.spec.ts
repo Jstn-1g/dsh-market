@@ -349,6 +349,26 @@ describe('manifest rollback (#65)', () => {
     const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
     expect(manifest.dsh).toEqual({ profile: { mode: 'manual' } })
   })
+
+  it('still snapshots dependencies when a parseable profile field is malformed', async () => {
+    const { readProfileManifestSnapshot, restoreProfileManifest } = await import('../src/profile.ts')
+    const dir = writeProfile({
+      name: 'web-profile',
+      dsh: { profile: null },
+      dependencies: { 'kept-pkg': '^1.0.0' },
+    })
+    const snapshot = readProfileManifestSnapshot('web')
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({
+      name: 'web-profile',
+      dsh: { profile: null },
+      dependencies: { 'kept-pkg': '^1.0.0', 'ghost-pkg': '^2.0.0' },
+    }))
+
+    expect(restoreProfileManifest('web', snapshot)).toEqual(['ghost-pkg'])
+    const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+    expect(manifest.dependencies).toEqual({ 'kept-pkg': '^1.0.0' })
+    expect(manifest.dsh).toEqual({ profile: null })
+  })
 })
 
 describe('setAllowBuilds (#6)', () => {

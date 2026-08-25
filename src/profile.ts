@@ -91,14 +91,20 @@ export interface ProfileManifestSnapshot {
   profileBundles: { present: false } | { present: true; value: unknown }
 }
 
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
 /** Read dependencies and the exact `dsh.profile.bundles` field before a package operation. */
 export function readProfileManifestSnapshot(profile: string, explicitDir?: string): ProfileManifestSnapshot {
   try {
     const manifest = JSON.parse(readFileSync(join(profileDir(profile, explicitDir), 'package.json'), 'utf8')) as {
       dependencies?: Record<string, string>
-      dsh?: { profile?: Record<string, unknown> }
+      dsh?: { profile?: unknown }
     }
-    const profileManifest = manifest.dsh?.profile
+    const profileManifest = objectRecord(manifest.dsh?.profile)
     const present = profileManifest !== undefined && Object.hasOwn(profileManifest, 'bundles')
     return {
       dependencies: { ...manifest.dependencies },
@@ -136,7 +142,7 @@ export function restoreProfileManifest(
   const file = join(profileDir(profile, explicitDir), 'package.json')
   let manifest: {
     dependencies?: Record<string, string>
-    dsh?: { profile?: Record<string, unknown> }
+    dsh?: unknown
   }
   try {
     manifest = JSON.parse(readFileSync(file, 'utf8')) as typeof manifest
@@ -152,7 +158,8 @@ export function restoreProfileManifest(
     if (current[name] !== snapshot.dependencies[name]) touched.add(name)
   }
 
-  const currentProfile = manifest.dsh?.profile
+  const currentDsh = objectRecord(manifest.dsh)
+  const currentProfile = objectRecord(currentDsh?.profile)
   const currentBundles = currentProfile !== undefined && Object.hasOwn(currentProfile, 'bundles')
     ? { present: true as const, value: currentProfile.bundles }
     : { present: false as const }
@@ -182,9 +189,11 @@ export function restoreProfileManifest(
   if (touched.size === 0) return []
   manifest.dependencies = { ...snapshot.dependencies }
   if (snapshot.profileBundles.present) {
-    manifest.dsh ??= {}
-    manifest.dsh.profile ??= {}
-    manifest.dsh.profile.bundles = structuredClone(snapshot.profileBundles.value)
+    const dsh = currentDsh ?? {}
+    const profileManifest = currentProfile ?? {}
+    manifest.dsh = dsh
+    dsh.profile = profileManifest
+    profileManifest.bundles = structuredClone(snapshot.profileBundles.value)
   } else if (currentProfile !== undefined) {
     delete currentProfile.bundles
   }
