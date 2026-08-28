@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   activeRegion, asRegion, DEFAULT_NPM_REGISTRY, REGIONS, routesFor, setActiveRegion, throughProxy,
 } from '../src/regions.ts'
-import { codeloadAllowBuildsKey, codeloadTarball, gitAllowBuildsKey, repoOfTarget } from '../src/sources.ts'
+import { codeloadAllowBuildsKey, codeloadTarball, githubCommitOfTarget, gitAllowBuildsKey, repoOfTarget } from '../src/sources.ts'
 import { githubProxyInUse, githubUrl, setGithubProxy } from '../src/client/market-data.ts'
 
 const SHA = 'b0e6c57ebeeb4796017864f5cd5c66e6ba0899ec'
@@ -123,6 +123,7 @@ describe('repoOfTarget', () => {
 
   it('keeps a subpath, which names a different plugin in the same repo', () => {
     expect(repoOfTarget('github:o/r#path:/packages/x')).toBe('o/r#path:/packages/x')
+    expect(repoOfTarget(`github:o/r#${SHA}&path:/packages/x`)).toBe('o/r#path:/packages/x')
   })
 
   it('is null for anything that is not a github source', () => {
@@ -132,6 +133,22 @@ describe('repoOfTarget', () => {
     // A tarball with no full SHA is not a target we produce, and treating it
     // as one would let an unpinned install pass the identity check.
     expect(repoOfTarget('https://codeload.github.com/o/r/tar.gz/HEAD')).toBeNull()
+  })
+})
+
+describe('githubCommitOfTarget', () => {
+  it('reads the exact pin from both target spellings without another HEAD lookup', () => {
+    expect(githubCommitOfTarget(`github:o/r#${SHA}`)).toBe(SHA)
+    expect(githubCommitOfTarget(`github:o/r#${SHA}&path:/packages/x`)).toBe(SHA)
+    expect(githubCommitOfTarget(codeloadTarball('o/r', SHA, 'https://gh-proxy.com'))).toBe(SHA)
+  })
+
+  it('refuses mutable, short, malformed, and non-github refs', () => {
+    expect(githubCommitOfTarget('github:o/r')).toBeNull()
+    expect(githubCommitOfTarget('github:o/r#main')).toBeNull()
+    expect(githubCommitOfTarget('github:o/r#b0e6c57')).toBeNull()
+    expect(githubCommitOfTarget(`github:o/r#path:/packages/x&${SHA}`)).toBeNull()
+    expect(githubCommitOfTarget(`https://example.test/o/r/tar.gz/${SHA}`)).toBeNull()
   })
 })
 

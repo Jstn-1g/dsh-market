@@ -9,8 +9,9 @@
  *   pnpm 10/11 succeed.
  * - `add -w` where NO pnpm-workspace.yaml exists: ALL majors fail with
  *   "--workspace-root may only be used inside a workspace".
- * - modules dir built by pnpm 9, then pnpm 10/11 mutate it:
- *   ERR_PNPM_PUBLIC_HOIST_PATTERN_DIFF (defaults drifted between majors).
+ * - modules dir built by pnpm 9, then pnpm 10/11 mutate it: a modules-layout
+ *   compatibility error (public-hoist-pattern on Unix; virtual-store path
+ *   length can be the first mismatch pnpm reports on Windows).
  */
 
 import { existsSync } from 'node:fs'
@@ -123,7 +124,8 @@ function withDecodedPnpmDiagnostics(output: string): string {
  * @returns the classified failure, or null when unrecognized (raw output is then shown as-is).
  */
 export function classifyPnpmFailure(output: string): PnpmFailure | null {
-  if (output.includes('ERR_PNPM_PUBLIC_HOIST_PATTERN_DIFF')) {
+  if (output.includes('ERR_PNPM_PUBLIC_HOIST_PATTERN_DIFF')
+    || output.includes('ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF')) {
     return {
       code: 'hoist-pattern-diff',
       recoverable: true,

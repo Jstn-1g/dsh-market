@@ -1,16 +1,26 @@
 /**
- * Routing a GitHub install through a region's proxy.
+ * Resolving a GitHub install through a region's proxy without proxying the
+ * tarball pnpm records.
  *
  * pnpm does not fetch `github:owner/repo` with `git clone`; it resolves the
  * shortcut and downloads a tarball from codeload.github.com. That rules out
  * the usual `git config insteadOf` trick — there is no git command to
- * redirect — and leaves rewriting the target as the only lever.
+ * redirect.
  *
- * Worth it: measured from an unproxied mainland connection, that tarball
- * takes 85s direct and 4.8s through the proxy.
+ * Prefix-proxying that tarball used to save substantial time, but pnpm 11's
+ * fail-closed lockfile checks changed the safety boundary. A URL shaped like
+ * `https://proxy/https://codeload.github.com/.../<commit>` no longer has the
+ * codeload hostname, so pnpm treats it as an ordinary remote tarball and
+ * requires an integrity hash that its GitHub resolver does not write. The
+ * result is ERR_PNPM_MISSING_TARBALL_INTEGRITY on the install itself (#385).
+ * Disabling that check or minting a checksum from whatever the proxy served
+ * would weaken pnpm's supply-chain protection, so neither is acceptable.
  *
- * Two properties have to survive the rewrite, and both were found the hard
- * way rather than assumed:
+ * The safe middle ground is to resolve HEAD through the regional proxy, then
+ * hand pnpm a commit-pinned `github:owner/repo#<sha>` target. The ref lookup
+ * still avoids a slow or unreachable GitHub metadata request; pnpm itself
+ * fetches the canonical codeload URL, records it as `gitHosted: true`, and
+ * keeps its integrity policy intact.
  *
  * - **The commit has to be pinned.** The profile reads each plugin's
  *   installed commit back out of the lockfile by matching a codeload URL
@@ -18,32 +28,31 @@
  *   perfectly and then reports no version forever. So this resolves the SHA
  *   first, and a rewrite that cannot get one does not happen.
  * - **Build-script approval has to keep matching.** `gitAllowBuildsKey`
- *   (src/sources.ts) derives its key from the repo, and now recognizes the
- *   proxied form too — a plugin does not become a different plugin because
- *   its bytes arrived by another route.
+ *   (src/sources.ts) derives its stable key from the repo, and the pinned
+ *   GitHub form preserves that identity.
  *
- * Subpath entries are left alone. A `#path:` selector picks one directory
- * out of a repo, and a tarball URL has nowhere to say that; those installs
- * stay on the direct route rather than quietly installing the wrong thing.
+ * Catalog subpath entries are left alone: `#path:` identifies a different
+ * package inside the repo, so the acceleration step never rewrites that
+ * fragment. Collection roots discovered after install preserve the resolved
+ * commit and add their subpath as pnpm's second `&path:` selector.
  *
- * Every failure falls back to the original target. Acceleration is an
- * optimisation, and an optimisation that can fail an install is a bug.
+ * Every SHA-lookup failure falls back to the original target. Acceleration
+ * is an optimisation, and an optimisation that can fail an install is a bug.
  */
 
 import { logEvent } from './log.ts'
 import { marketFetch } from './net.ts'
 import { routesFor, type Region } from './regions.ts'
-import { codeloadTarball } from './sources.ts'
 
-/** A bare repo shortcut: the only target shape a tarball URL can express. */
+/** A bare repo shortcut whose HEAD can be replaced by one immutable ref. */
 const BARE_GITHUB_RE = /^github:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)$/
 
 /**
  * How long to wait for the SHA before giving up and installing directly.
  *
  * Short on purpose: this is spent BEFORE the download starts, and the whole
- * point is to save time. A proxy that cannot answer in a few seconds is not
- * going to serve a tarball quickly either.
+ * point is to avoid a slow or unreachable direct metadata lookup. A proxy
+ * that cannot answer promptly should not delay pnpm's ordinary direct path.
  */
 const RESOLVE_TIMEOUT_MS = 6000
 
@@ -109,7 +118,7 @@ export async function resolveHeadCommit(
  * @param target - what `installTargetFor` produced.
  * @param region - the download region.
  * @param env - environment, for the proxy override.
- * @returns a proxied commit-pinned tarball URL when every condition holds,
+ * @returns a commit-pinned GitHub shortcut when the mirror resolves HEAD,
  *   otherwise `target` unchanged.
  */
 export async function acceleratedTarget(
@@ -130,7 +139,7 @@ export async function acceleratedTarget(
       logEvent('info', 'region', `${repo}: could not resolve a commit through the mirror; installing directly`)
       return target
     }
-    return codeloadTarball(repo, sha, proxy)
+    return `github:${repo}#${sha}`
   } finally {
     clearTimeout(timer)
   }

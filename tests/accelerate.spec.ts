@@ -1,11 +1,12 @@
 /**
- * Rewriting a GitHub install target onto a region's mirror.
+ * Pinning a GitHub install target after resolving HEAD through a region's mirror.
  *
  * Every assertion here is about a way the rewrite must NOT happen, because
  * that is where the risk is. A rewrite that loses the commit pin installs
  * fine and then reports no version forever; a rewrite applied to a subpath
- * entry would install the wrong package outright; and a rewrite that can
- * fail an install has turned an optimisation into a bug.
+ * entry would install the wrong package outright; and a prefix-proxied
+ * tarball is no longer recognized as git-hosted by pnpm 11, so its missing
+ * integrity field makes the profile fail closed (#385).
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -48,10 +49,10 @@ describe('acceleratedTarget', () => {
     await expect(acceleratedTarget('github:o/r', 'global', {})).resolves.toBe('github:o/r')
   })
 
-  it('rewrites a bare repo to a commit-pinned tarball on the mirror', async () => {
+  it('uses the mirror to resolve HEAD but keeps pnpm on an integrity-safe github target (#385)', async () => {
     stubResolve('refs')
     await expect(acceleratedTarget('github:o/r', 'china', CHINA)).resolves
-      .toBe(`https://gh.test/https://codeload.github.com/o/r/tar.gz/${SHA}`)
+      .toBe(`github:o/r#${SHA}`)
   })
 
   it('picks HEAD out of the advertisement, not the first sha it sees', async () => {

@@ -1195,15 +1195,28 @@ window.__ModuleLoader__.load({ id: "dshmarket", factory: (require) => {
 				ids.add(value.toLowerCase());
 			}
 		}
+		/** Repo identities carried by a github shortcut, including `#sha&path:`. */
+		function githubSpecRepoIds(spec) {
+			const ids = /* @__PURE__ */ new Set();
+			const match = /^github:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?(?:#(.*))?$/i.exec(spec);
+			if (match === null) return ids;
+			const repo = match[1].toLowerCase();
+			let subpath = null;
+			for (const selector of (match[2] ?? "").split("&")) {
+				if (!selector.startsWith("path:/")) continue;
+				const candidate = selector.slice(6);
+				if (!REPO_ID_RE.test(`${repo}#path:/${candidate}`) || candidate.split("/").some((seg) => seg === "" || seg === "." || seg === "..") || subpath !== null) return /* @__PURE__ */ new Set();
+				subpath = candidate.toLowerCase();
+			}
+			ids.add(repo);
+			if (subpath !== null) ids.add(`${repo}#path:/${subpath}`);
+			return ids;
+		}
 		function depIdentities(name, spec, repoIdentities = []) {
 			const ids = /* @__PURE__ */ new Set([name.toLowerCase()]);
 			const scoped = /^@([^/]+)\/(.+)$/.exec(name);
 			if (scoped !== null) ids.add(`${scoped[1].toLowerCase()}/${scoped[2].toLowerCase()}`);
-			const match = /github:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)(?:#path:\/([A-Za-z0-9_./-]+))?/i.exec(spec);
-			if (match !== null) {
-				ids.add(match[1].toLowerCase());
-				if (match[2] !== void 0) ids.add(`${match[1].toLowerCase()}#path:/${match[2].toLowerCase()}`);
-			}
+			for (const id of githubSpecRepoIds(spec)) ids.add(id);
 			addRepoIdentities(ids, repoIdentities);
 			return ids;
 		}
@@ -1213,12 +1226,7 @@ window.__ModuleLoader__.load({ id: "dshmarket", factory: (require) => {
 		* mirror in depIdentities, which is only a matching aid.
 		*/
 		function depRepoIds(spec, repoIdentities = []) {
-			const ids = /* @__PURE__ */ new Set();
-			const m = /github:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)(?:#path:\/([A-Za-z0-9_./-]+))?/i.exec(spec);
-			if (m !== null) {
-				ids.add(m[1].toLowerCase());
-				if (m[2] !== void 0) ids.add(`${m[1].toLowerCase()}#path:/${m[2].toLowerCase()}`);
-			}
+			const ids = githubSpecRepoIds(spec);
 			addRepoIdentities(ids, repoIdentities);
 			return ids;
 		}

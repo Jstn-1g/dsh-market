@@ -18,6 +18,9 @@ import { classifyPnpmFailure, pluginArgsFor } from '../src/pnpm-compat.ts'
 
 /** Last release of each major the market supports; behavior is per-major. */
 const PNPM = { 9: '9.15.9', 10: '10.28.2', 11: '11.21.0' } as const
+/** Version pinned by the DSH Desktop 2.0.3 distribution reported in #385. */
+const DESKTOP_PNPM = '11.8.0'
+const GIT_FIXTURE_SHA = '6ebf1e03de0ada9e653d1f8ff82ad905ab761ad9'
 
 const dirs: string[] = []
 afterEach(() => { while (dirs.length > 0) rmSync(dirs.pop()!, { recursive: true, force: true }) })
@@ -35,11 +38,19 @@ function profileFixture(options: { workspace: boolean; extraWorkspaceYaml?: stri
 }
 
 function pnpm(version: string, args: string[], cwd: string): { code: number | null; out: string } {
-  const r = spawnSync('npx', ['-y', `pnpm@${version}`, ...args], {
+  // `npx` is a cmd shim on Windows and cannot be spawned directly without a
+  // shell. Keep argument arrays on both platforms; no package target is ever
+  // interpolated into a command string.
+  const command = process.platform === 'win32' ? (process.env.ComSpec ?? 'cmd.exe') : 'npx'
+  const commandArgs = process.platform === 'win32'
+    ? ['/d', '/s', '/c', 'npx', '-y', `pnpm@${version}`, ...args]
+    : ['-y', `pnpm@${version}`, ...args]
+  const r = spawnSync(command, commandArgs, {
     cwd, encoding: 'utf8', timeout: 240_000,
     env: { ...process.env, CI: 'true', COREPACK_ENABLE_STRICT: '0' },
   })
-  return { code: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` }
+  const spawnError = r.error === undefined ? '' : `\n${r.error.name}: ${r.error.message}`
+  return { code: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}${spawnError}` }
 }
 
 function installedVersion(dir: string, name: string): string | null {
@@ -92,15 +103,76 @@ describe('the market argv decision works on every pnpm major × profile shape', 
   })
 })
 
+describe('#385 — pnpm keeps a commit-pinned github shortcut inside its git-hosted trust boundary', () => {
+  it('installs on Desktop and current pnpm, then survives the next dependency mutation', () => {
+    for (const version of [DESKTOP_PNPM, PNPM[11]]) {
+      const dir = profileFixture({ workspace: true })
+      const target = `github:pnpm/test-git-fetch#${GIT_FIXTURE_SHA}`
+
+      const installed = pnpm(version, ['add', '-w', '--ignore-scripts', target], dir)
+      expect(installed.code, `pnpm ${version}\n${installed.out.slice(-600)}`).toBe(0)
+
+      const lockfile = readFileSync(join(dir, 'pnpm-lock.yaml'), 'utf8')
+      expect(lockfile).toContain(`codeload.github.com/pnpm/test-git-fetch/tar.gz/${GIT_FIXTURE_SHA}`)
+      expect(lockfile).toContain('gitHosted: true')
+
+      // A prefix-proxied codeload URL loses that marker and #385 fails here
+      // with ERR_PNPM_MISSING_TARBALL_INTEGRITY. The pinned github shortcut
+      // remains valid when pnpm verifies the whole lockfile on a later add.
+      // Keep this compatibility probe about lockfile integrity. The fixture
+      // deliberately has a prepare script, whose separate allowBuilds policy
+      // would otherwise stop the second command before this assertion.
+      const mutation = pnpm(version, ['add', '-w', '--ignore-scripts', 'is-odd@3.0.1'], dir)
+      expect(mutation.code, `pnpm ${version}\n${mutation.out.slice(-600)}`).toBe(0)
+      expect(mutation.out).not.toContain('ERR_PNPM_MISSING_TARBALL_INTEGRITY')
+    }
+  })
+
+  it('repairs the orphaned proxy lock entry left by a failed Desktop install', () => {
+    const dir = profileFixture({ workspace: true })
+    const target = `github:pnpm/test-git-fetch#${GIT_FIXTURE_SHA}`
+    const canonical = `https://codeload.github.com/pnpm/test-git-fetch/tar.gz/${GIT_FIXTURE_SHA}`
+    const proxied = `https://gh-proxy.com/${canonical}`
+
+    const seed = pnpm(DESKTOP_PNPM, ['add', '-w', '--ignore-scripts', target], dir)
+    expect(seed.code, seed.out.slice(-600)).toBe(0)
+
+    // Recreate the durable state left by v1.34 after the failed install:
+    // package.json was restored, but pnpm's prefix-proxy resolution remained
+    // orphaned in the lockfile without its git-hosted trust marker.
+    const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as Record<string, unknown>
+    manifest.dependencies = {}
+    writeFileSync(join(dir, 'package.json'), JSON.stringify(manifest))
+    const lockPath = join(dir, 'pnpm-lock.yaml')
+    const poisoned = readFileSync(lockPath, 'utf8')
+      .replaceAll(canonical, proxied)
+      .replaceAll('gitHosted: true, ', '')
+    expect(poisoned).toContain(proxied)
+    expect(poisoned).not.toContain('gitHosted: true')
+    writeFileSync(lockPath, poisoned)
+
+    const repaired = pnpm(DESKTOP_PNPM, ['add', '-w', '--ignore-scripts', target], dir)
+    expect(repaired.code, repaired.out.slice(-600)).toBe(0)
+    const repairedLock = readFileSync(lockPath, 'utf8')
+    expect(repairedLock).not.toContain('gh-proxy.com')
+    expect(repairedLock).toContain(canonical)
+    expect(repairedLock).toContain('gitHosted: true')
+
+    const mutation = pnpm(DESKTOP_PNPM, ['add', '-w', '--ignore-scripts', 'is-odd@3.0.1'], dir)
+    expect(mutation.code, mutation.out.slice(-600)).toBe(0)
+    expect(mutation.out).not.toContain('ERR_PNPM_MISSING_TARBALL_INTEGRITY')
+  })
+})
+
 describe('#20 bug 2 — modules dir built by pnpm 9, mutated by pnpm 11', () => {
-  it('fails with ERR_PNPM_PUBLIC_HOIST_PATTERN_DIFF, and one `install` + retry recovers', () => {
+  it('fails with a modules-layout mismatch, and one `install` + retry recovers', () => {
     const dir = profileFixture({ workspace: true })
     const seed = pnpm(PNPM[9], ['add', '-w', 'is-odd@3.0.1'], dir)
     expect(seed.code, seed.out.slice(-400)).toBe(0)
 
     const drift = pnpm(PNPM[11], ['add', '-w', 'is-even@1.0.0'], dir)
     expect(drift.code).not.toBe(0)
-    expect(drift.out).toContain('ERR_PNPM_PUBLIC_HOIST_PATTERN_DIFF')
+    expect(drift.out).toMatch(/ERR_PNPM_(?:PUBLIC_HOIST_PATTERN|VIRTUAL_STORE_DIR_MAX_LENGTH)_DIFF/)
     const failure = classifyPnpmFailure(drift.out)
     expect(failure?.code).toBe('hoist-pattern-diff')
     expect(failure?.recoverable).toBe(true)

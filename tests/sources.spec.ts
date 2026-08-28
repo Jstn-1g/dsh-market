@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from 'vitest'
 import {
-  findCatalogEntryForLocal, findInstalledAlias, gitAllowBuildsKey, githubRemoteIdentities, githubRepoIdentities, githubRepoIdentity,
+  findCatalogEntryForLocal, findInstalledAlias, gitAllowBuildsKey, githubRemoteIdentities, githubRepoIdentities, githubRepoIdentity, githubTargetAtCommit,
   installTargetFor, isLocalSpec, parseGitHubRemote, parseGitHubRepository, parseSourceUrl, repoOf, restoreBlockedByWorkspace, restoreTargetForLocal, workspaceProtocolDeps,
 } from '../src/sources.ts'
 
@@ -240,5 +240,26 @@ describe('findInstalledAlias (#27 duplicate guard)', () => {
     expect(findInstalledAlias(sameA, installed)).toBe('plug-a')
     // A collection root entry still matches the pieces it was retargeted into.
     expect(findInstalledAlias({ name: 'mono', url: 'https://github.com/m/mono' }, installed)).toBe('plug-a')
+
+    const sha = 'b0e6c57ebeeb4796017864f5cd5c66e6ba0899ec'
+    const pinned = { 'plug-a': `github:m/mono#${sha}&path:/packages/plug-a` }
+    expect(findInstalledAlias(siblingB, pinned)).toBeNull()
+    expect(findInstalledAlias(sameA, pinned)).toBe('plug-a')
+  })
+})
+
+describe('githubTargetAtCommit', () => {
+  const sha = 'b0e6c57ebeeb4796017864f5cd5c66e6ba0899ec'
+
+  it('replaces the revision while preserving one valid monorepo subpath', () => {
+    expect(githubTargetAtCommit('github:o/r', sha)).toBe(`github:o/r#${sha}`)
+    expect(githubTargetAtCommit('github:o/r#main', sha)).toBe(`github:o/r#${sha}`)
+    expect(githubTargetAtCommit('github:o/r#main&path:/packages/x', sha))
+      .toBe(`github:o/r#${sha}&path:/packages/x`)
+  })
+
+  it('refuses non-github targets and invalid commits', () => {
+    expect(githubTargetAtCommit('dsh-loop', sha)).toBeNull()
+    expect(githubTargetAtCommit('github:o/r', 'short')).toBeNull()
   })
 })

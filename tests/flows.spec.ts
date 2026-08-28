@@ -398,7 +398,7 @@ interface Testbed {
 }
 
 function createTestbed(
-  config: { profile?: string; allowRestart?: boolean; profileDirectory?: string } = {},
+  config: { profile?: string; allowRestart?: boolean; profileDirectory?: string; region?: 'global' | 'china' } = {},
   runtime?: Parameters<typeof mountMarketRoutes>[2],
   agents?: AgentsServiceLike,
 ): Testbed {
@@ -1274,8 +1274,8 @@ describe('update flow — no npm publishing required', () => {
   })
 
   it('updates a mirror-installed plugin from GitHub, not from a same-named npm package', async () => {
-    // The spelling a plugin carries under a download region that mirrors
-    // GitHub is a proxied codeload URL, not the `github:` shortcut. The
+    // The spelling older market versions wrote under a mirrored region is a
+    // proxied codeload URL, not the `github:` shortcut. The
     // update route recognised only the shortcut, so these fell through to
     // the registry path — and `name@latest` for a GitHub-only plugin either
     // fails outright or installs whatever unrelated package happens to own
@@ -1286,7 +1286,7 @@ describe('update flow — no npm publishing required', () => {
     fake.repos['github:o/r'] = { name: 'plug-b', manifest: { dsh: {}, main: 'index.js' }, artifacts: ['index.js'] }
     await bed.dispatch('POST', '/dsh-market/install', { url: 'https://github.com/o/r' })
 
-    // Rewrite the manifest to the spelling a China-region install produces.
+    // Rewrite the manifest to the legacy China-region spelling.
     const manifestPath = join(profileDir('web'), 'package.json')
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
     manifest.dependencies['plug-b'] = proxied
@@ -1620,7 +1620,10 @@ describe('update flow — no npm publishing required', () => {
     }
 
     const manifest = JSON.parse(readFileSync(join(fake.profileDir, 'package.json'), 'utf8')) as Record<string, unknown>
-    manifest.dependencies = { 'dsh-loop': 'github:owner/dsh-loop' }
+    // The durable spec itself is authoritative even when the lockfile has
+    // been removed or is stale. Update detection already understands this
+    // spelling; rollback must capture the same old commit from it.
+    manifest.dependencies = { 'dsh-loop': `github:owner/dsh-loop#${OLD}` }
     writeFileSync(join(fake.profileDir, 'package.json'), JSON.stringify(manifest))
     const pkgDir = join(fake.profileDir, 'node_modules', 'dsh-loop')
     mkdirSync(join(pkgDir, 'lib'), { recursive: true })
@@ -1629,7 +1632,14 @@ describe('update flow — no npm publishing required', () => {
     const hostPeerDir = join(fake.profileDir, 'node_modules', '@deepseek-ai', 'dsh-settings')
     mkdirSync(hostPeerDir, { recursive: true })
     writeFileSync(join(hostPeerDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-settings', version: '0.1.0-rc.6' }))
-    writeFileSync(join(fake.profileDir, 'pnpm-lock.yaml'), `lockfileVersion: 9\n  resolution: {tarball: https://codeload.github.com/owner/dsh-loop/tar.gz/${OLD}}\n`)
+    writeFileSync(join(fake.profileDir, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n')
+
+    // Exercise the China path: the update target itself is already pinned
+    // after HEAD is resolved through the mirror. Rollback must replace that
+    // pin, not append a second `#` to it (#385).
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(`001e${NEW} HEAD\0multi_ack\n`, { status: 200 })))
+    bed.dispose()
+    bed = createTestbed({ region: 'china' })
 
     const r = await bed.dispatch('POST', '/dsh-market/update', { name: 'dsh-loop' })
     expect(r.status).toBe(200)
@@ -1639,7 +1649,10 @@ describe('update flow — no npm publishing required', () => {
     const rollback = await bed.dispatch('POST', '/dsh-market/rollback', { rollbackId: r.json.compatibility.rollbackId })
     expect(rollback.status).toBe(200)
     expect(rollback.json.rolledBack).toBe(true)
-    expect(installedSpec('dsh-loop')).toBe('github:owner/dsh-loop')
+    expect(installedSpec('dsh-loop')).toBe(`github:owner/dsh-loop#${OLD}`)
+    expect(fake.calls.some(call => call.includes(`github:owner/dsh-loop#${NEW}`))).toBe(true)
+    expect(fake.calls.some(call => call.includes(`github:owner/dsh-loop#${OLD}`))).toBe(true)
+    expect(fake.calls.flat().some(arg => arg.includes(`#${NEW}#${OLD}`))).toBe(false)
     const restored = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')) as Record<string, unknown>
     expect(restored.peerDependencies).toBeUndefined()
   })
@@ -2246,7 +2259,7 @@ describe('build-script approval flow (#6)', () => {
   })
 
   it('writes both allowBuilds key forms, so pnpm below 11.21 can match one (#285)', async () => {
-    // pnpm 11.21+ matches `name@git+https://…`; 11.7.0 — what DSH Desktop
+    // pnpm 11.21+ matches `name@git+https://…`; 11.8.0 — what DSH Desktop
     // bundles — matches only the commit-pinned codeload URL it names in its
     // own error. Writing one form meant the approval button could never work
     // on the other, and the failure was silent: the YAML looked authorized.
@@ -2269,6 +2282,24 @@ describe('build-script approval flow (#6)', () => {
     // The pin comes from the installed spec, with no lookup in between — an
     // approval must not depend on reaching the network to be written.
     expect(yaml).toContain(`plug-c@https://codeload.github.com/o/r/tar.gz/${sha}: true`)
+  })
+
+  it('uses a commit-pinned github spec for old-pnpm build approval without re-resolving HEAD (#385)', async () => {
+    const sha = 'b0e6c57ebeeb4796017864f5cd5c66e6ba0899ec'
+    mkdirSync(join(profileDir('web'), 'node_modules', 'plug-pinned'), { recursive: true })
+    writeFileSync(join(profileDir('web'), 'node_modules', 'plug-pinned', 'package.json'), '{"name":"plug-pinned"}')
+    const manifestPath = join(profileDir('web'), 'package.json')
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+    manifest.dependencies = { ...manifest.dependencies, 'plug-pinned': `github:o/r#${sha}` }
+    writeFileSync(manifestPath, JSON.stringify(manifest))
+    // An exact installed pin must be enough even when HEAD cannot be reached.
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline') }))
+
+    const approve = await bed.dispatch('POST', '/dsh-market/approve-builds', { packages: ['plug-pinned'] })
+    expect(approve.status).toBe(200)
+    const yaml = readFileSync(join(profileDir('web'), 'pnpm-workspace.yaml'), 'utf8')
+    expect(yaml).toContain('plug-pinned@git+https://github.com/o/r.git: true')
+    expect(yaml).toContain(`plug-pinned@https://codeload.github.com/o/r/tar.gz/${sha}: true`)
   })
 
   it('surfaces a git-prepare rejection and approves the not-yet-installed package via the curated registry (#68)', async () => {

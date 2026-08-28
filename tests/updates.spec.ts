@@ -143,6 +143,11 @@ describe('checkUpdates — github pins', () => {
     expect(result.themer).toMatchObject({ current: HEAD, latest: HEAD, updateAvailable: false })
   })
 
+  it('uses an exact commit carried by the github spec when the lockfile is absent', async () => {
+    const result = await checkUpdates('web', true, profileWith(`github:owner/themer#${OLD}`, null))
+    expect(result.themer).toMatchObject({ current: OLD, latest: HEAD, updateAvailable: true })
+  })
+
   it('claims no update when the pin is unknown — an unknown is not a difference', async () => {
     // No lockfile entry: `current` is null. Reporting an update here would
     // offer a reinstall the user cannot evaluate.

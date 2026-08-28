@@ -481,17 +481,33 @@ function addRepoIdentities(ids: Set<string>, values: readonly string[]): void {
   }
 }
 
+/** Repo identities carried by a github shortcut, including `#sha&path:`. */
+function githubSpecRepoIds(spec: string): Set<string> {
+  const ids = new Set<string>()
+  const match = /^github:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?(?:#(.*))?$/i.exec(spec)
+  if (match === null) return ids
+  const repo = match[1]!.toLowerCase()
+  let subpath: string | null = null
+  for (const selector of (match[2] ?? '').split('&')) {
+    if (!selector.startsWith('path:/')) continue
+    const candidate = selector.slice('path:/'.length)
+    if (!REPO_ID_RE.test(`${repo}#path:/${candidate}`)
+      || candidate.split('/').some(seg => seg === '' || seg === '.' || seg === '..')
+      || subpath !== null) return new Set()
+    subpath = candidate.toLowerCase()
+  }
+  ids.add(repo)
+  if (subpath !== null) ids.add(`${repo}#path:/${subpath}`)
+  return ids
+}
+
 function depIdentities(name: string, spec: string, repoIdentities: readonly string[] = []): Set<string> {
   const ids = new Set<string>([name.toLowerCase()])
   // A scoped npm key usually mirrors owner/repo — expose that identity so an
   // npm-installed plugin still matches an entry whose npm field is unset.
   const scoped = /^@([^/]+)\/(.+)$/.exec(name)
   if (scoped !== null) ids.add(`${scoped[1]!.toLowerCase()}/${scoped[2]!.toLowerCase()}`)
-  const match = /github:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)(?:#path:\/([A-Za-z0-9_./-]+))?/i.exec(spec)
-  if (match !== null) {
-    ids.add(match[1]!.toLowerCase())
-    if (match[2] !== undefined) ids.add(`${match[1]!.toLowerCase()}#path:/${match[2].toLowerCase()}`)
-  }
+  for (const id of githubSpecRepoIds(spec)) ids.add(id)
   addRepoIdentities(ids, repoIdentities)
   return ids
 }
@@ -502,12 +518,7 @@ function depIdentities(name: string, spec: string, repoIdentities: readonly stri
  * mirror in depIdentities, which is only a matching aid.
  */
 function depRepoIds(spec: string, repoIdentities: readonly string[] = []): Set<string> {
-  const ids = new Set<string>()
-  const m = /github:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)(?:#path:\/([A-Za-z0-9_./-]+))?/i.exec(spec)
-  if (m !== null) {
-    ids.add(m[1]!.toLowerCase())
-    if (m[2] !== undefined) ids.add(`${m[1]!.toLowerCase()}#path:/${m[2].toLowerCase()}`)
-  }
+  const ids = githubSpecRepoIds(spec)
   addRepoIdentities(ids, repoIdentities)
   return ids
 }

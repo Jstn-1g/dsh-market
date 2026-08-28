@@ -153,21 +153,32 @@ export function codeloadTarball(repo: string, sha: string, proxy: string | null)
  * target uses — `owner/repo` in its ORIGINAL case, plus any `#path:`
  * subpath.
  *
- * One plugin now has two spellings depending on the download region: the
- * `github:` shortcut and a proxied codeload tarball. Both have to resolve
- * here, or switching regions makes every installed plugin look like a
- * different one.
+ * Current installs use `github:` shortcuts. Older regional installs can
+ * still carry a prefix-proxied codeload tarball, so both spellings resolve
+ * here during update, duplicate detection, and recovery.
  */
-function repoFromTarget(spec: string): { repo: string; subpath: string | null } | null {
+function githubShortcut(spec: string): { repo: string; subpath: string | null } | null {
   const shortcut = /^github:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?(?:#(.*))?$/.exec(spec)
-  if (shortcut !== null) {
-    // Any fragment is accepted (`#path:`, `#semver:`, a bare ref) because
-    // only `#path:` changes which plugin this is; the rest select a version
-    // of the same one.
-    const pathMatch = /^path:\/(.+)$/.exec(shortcut[2] ?? '')
-    const subpath = pathMatch === null ? null : pathMatch[1]!
-    return { repo: shortcut[1]!, subpath: subpath !== null && validSubpath(subpath) ? subpath : null }
+  if (shortcut === null) return null
+  // Any non-path fragment is accepted (`#semver:`, a bare ref) because only
+  // `path:` changes which plugin this is; the rest select a version of the
+  // same one. pnpm permits a revision and subpath together as
+  // `#<revision>&path:/sub`, which is what a mirror-resolved collection
+  // install uses (#385).
+  let subpath: string | null = null
+  for (const selector of (shortcut[2] ?? '').split('&')) {
+    const pathMatch = /^path:\/(.+)$/.exec(selector)
+    if (pathMatch === null) continue
+    const candidate = pathMatch[1]!
+    if (subpath !== null || !validSubpath(candidate)) return null
+    subpath = candidate
   }
+  return { repo: shortcut[1]!, subpath }
+}
+
+function repoFromTarget(spec: string): { repo: string; subpath: string | null } | null {
+  const shortcut = githubShortcut(spec)
+  if (shortcut !== null) return shortcut
   // A codeload tarball, direct or proxied. Matched as a substring for the
   // same reason profile.ts does: the proxy sits in FRONT of the real URL,
   // so anchoring the pattern would see only the proxy's own hostname.
@@ -190,16 +201,43 @@ export function repoOfTarget(spec: string): string | null {
 }
 
 /**
+ * An immutable GitHub commit already carried by an install target.
+ *
+ * Build-script approval on pnpm below 11.21 needs the exact commit-pinned
+ * codeload key. Re-resolving HEAD after an install can race a repository push
+ * and approve a different URL, so consume an existing pin whenever the spec
+ * has one (#285/#385).
+ */
+export function githubCommitOfTarget(spec: string): string | null {
+  const shortcut = githubShortcut(spec)
+  const revision = shortcut === null ? null : /^github:[^#]+#([0-9a-f]{40})(?:&|$)/.exec(spec)
+  if (revision !== null) return revision[1]!
+  const tarball = /codeload\.github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/tar\.gz\/([0-9a-f]{40})(?:[?#][^\s]*)?$/.exec(spec)
+  return tarball === null ? null : tarball[1]!
+}
+
+/**
+ * Pin a GitHub shortcut to one immutable commit without losing its subpath.
+ * Revision selectors are replaced; one valid `path:` selector is preserved.
+ */
+export function githubTargetAtCommit(spec: string, sha: string): string | null {
+  if (!/^[0-9a-f]{40}$/.test(sha)) return null
+  const parsed = githubShortcut(spec)
+  if (parsed === null) return null
+  return `github:${parsed.repo}#${sha}${parsed.subpath === null ? '' : `&path:/${parsed.subpath}`}`
+}
+
+/**
  * The allowBuilds key that actually authorizes a git-hosted dependency's
  * build scripts. Verified against pnpm 11.21 (#68 by @yzr278892): for a
  * `github:owner/repo` install, a bare `name: true` entry does NOT match —
  * pnpm's own hint names a commit-pinned codeload URL that changes on every
  * push; the stable form that matches is `name@git+https://github.com/owner/repo.git`.
  *
- * A China-region install addresses the SAME repo through a proxied codeload
- * URL, and must authorize under the same key: the plugin a user approved
- * build scripts for does not become a different plugin because the bytes
- * arrived by another route.
+ * A legacy China-region install may address the SAME repo through a proxied
+ * codeload URL, and must authorize under the same key: the plugin a user
+ * approved build scripts for does not become a different plugin because its
+ * stored source spelling differs.
  *
  * @param name - installed package name.
  * @param spec - the dependency spec from package.json, or the install target.
@@ -220,7 +258,7 @@ export function gitAllowBuildsKey(name: string, spec: string): string | null {
  *
  * The stable `name@git+https://…` key above is what pnpm 11.21+ matches, and
  * it is the better key precisely because it does not change when the
- * repository is pushed to. Older pnpm does not match it at all: 11.7.0 — the
+ * repository is pushed to. Older pnpm does not match it at all: 11.8.0 — the
  * version DSH Desktop still bundles — matches only the commit-pinned
  * codeload URL it names in its own `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`
  * message. On those versions the "allow build scripts and retry" button
@@ -408,10 +446,10 @@ export function findInstalledAlias(
     const dep = new Set<string>([name.toLowerCase()])
     const scoped = /^@([^/]+)\/(.+)$/.exec(name)
     if (scoped !== null) dep.add(`${scoped[1]}/${scoped[2]}`.toLowerCase())
-    const m = /github:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)(?:#path:\/([A-Za-z0-9_./-]+))?/i.exec(spec)
-    if (m !== null) {
-      dep.add(m[1].toLowerCase())
-      if (m[2] !== undefined) dep.add(`${m[1].toLowerCase()}#path:/${m[2].toLowerCase()}`)
+    const repoId = repoOfTarget(spec)
+    if (repoId !== null) {
+      dep.add(repoId.split('#path:/')[0]!)
+      dep.add(repoId)
       // Repo evidence on both sides is decisive (#66): the curated registry
       // lists distinct plugins under one name (both dsh-usage-stats, four
       // dsh-memory…), so a github-installed dependency is the entry's plugin

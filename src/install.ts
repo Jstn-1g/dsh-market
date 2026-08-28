@@ -215,11 +215,15 @@ export async function retargetCollections(
       continue
     }
     for (const sub of candidates) {
-      const result = await run(profile, ['add', `${target}#path:/${sub}`])
+      // A China-region root may already carry the commit resolved through
+      // the mirror (`#<sha>`). pnpm's fragment grammar joins the subpath as
+      // another selector with `&`; a second `#` produces an invalid target.
+      const subTarget = `${target}${target.includes('#') ? '&' : '#'}path:/${sub}`
+      const result = await run(profile, ['add', subTarget])
       if (result.exitCode !== 0 || result.timedOut) {
         allOk = false
         logEvent('error', 'install',
-          `${target}#path:/${sub}: exit=${String(result.exitCode)}${result.timedOut ? ' TIMEOUT' : ''} — ${(result.stderr || result.stdout).slice(-220)}`)
+          `${subTarget}: exit=${String(result.exitCode)}${result.timedOut ? ' TIMEOUT' : ''} — ${(result.stderr || result.stdout).slice(-220)}`)
       }
     }
   }

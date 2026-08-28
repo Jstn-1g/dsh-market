@@ -26,6 +26,7 @@ afterEach(() => {
 })
 
 const ok: InstallResult = { exitCode: 0, timedOut: false, stdout: '', stderr: '', cancelled: false }
+const SHA = 'b0e6c57ebeeb4796017864f5cd5c66e6ba0899ec'
 
 const FETCH_TIMEOUT_STDERR = '[23] The operation was aborted due to timeout\n\nTimeoutError: The operation was aborted due to timeout'
 
@@ -80,6 +81,16 @@ describe('retargetCollections (#18)', () => {
     expect(calls.slice(1).map(c => c[1]).sort()).toEqual([
       'github:o/r#path:/packages/theme-b',
       'github:o/r#path:/theme-a',
+    ])
+
+    // China-region installs now carry the commit resolved through the mirror.
+    // The subpath is a second selector in that same fragment; a second `#`
+    // would silently hand pnpm an invalid target (#385).
+    const pinned = recordingRunner()
+    expect(await retargetCollections(pinned.run, 'web', new Set(['existing', 'dsh-loop']), `github:o/r#${SHA}`)).toBe(true)
+    expect(pinned.calls.slice(1).map(c => c[1]).sort()).toEqual([
+      `github:o/r#${SHA}&path:/packages/theme-b`,
+      `github:o/r#${SHA}&path:/theme-a`,
     ])
   })
 

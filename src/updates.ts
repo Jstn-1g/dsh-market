@@ -9,7 +9,7 @@ import { headCommit } from './accelerate.ts'
 import { marketFetch } from './net.ts'
 import { activeRegion, routesFor } from './regions.ts'
 import { profileDir, readInstalled, readInstalledVersion, readLockCommits } from './profile.ts'
-import { repoOfTarget } from './sources.ts'
+import { githubCommitOfTarget, repoOfTarget } from './sources.ts'
 
 export interface UpdateStatus {
   kind: 'github' | 'npm' | 'linked'
@@ -267,20 +267,19 @@ export async function checkUpdates(
       result[name] = { kind: 'linked', version, current: null, latest: null, updateAvailable: false }
       return
     }
-    // The repo behind the spec, in EITHER spelling. A plugin installed under
-    // a download region that mirrors GitHub carries a proxied codeload URL
-    // rather than the `github:` shortcut, and asking only about the shortcut
-    // sent those through the npm branch below — where a GitHub-only plugin
+    // The repo behind the spec, in every supported spelling. Older regional
+    // installs can carry a proxied codeload URL rather than a `github:`
+    // shortcut, and asking only about the shortcut sent those through the npm
+    // branch below — where a GitHub-only plugin
     // either 404s or, far worse, matches an unrelated package that happens
     // to share its name.
     const repo = repoOfTarget(spec)?.split('#')[0] ?? null
     try {
       if (repo !== null) {
-        // The pinned commit is in the spec itself for a proxied install, and
-        // in the lockfile for a `github:` one. Prefer the spec: it is the
-        // exact thing that was fetched, with no lookup in between.
-        const pinned = /codeload\.github\.com\/[^/\s]+\/[^/\s]+\/tar\.gz\/([0-9a-f]{40})/.exec(spec)
-        const current = pinned?.[1] ?? lockCommits.get(repo) ?? null
+        // A proxied legacy URL or exact `github:#sha` carries its pin in the
+        // spec; a mutable `github:` shortcut keeps it in the lockfile. Prefer
+        // the spec because it is authoritative even if the lockfile is stale.
+        const current = githubCommitOfTarget(spec) ?? lockCommits.get(repo) ?? null
         // git's own ref advertisement, NOT api.github.com/repos/…/commits.
         // The REST API allows 60 requests an hour per IP unauthenticated,
         // shared across every plugin AND every check — a handful of

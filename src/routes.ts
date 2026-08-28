@@ -33,7 +33,7 @@ import { applyBundleOrder, mergeOrder, readBundleRules, readBundleStack, validat
 import { applyPreset, deletePreset, listPresets, previewPreset, savePreset } from './presets.ts'
 import { createProfileSnapshot, DEFAULT_MAX_SNAPSHOTS, deleteSnapshot, listSnapshots, restoreSnapshot } from './snapshot.ts'
 import { trialValidate } from './trial.ts'
-import { codeloadAllowBuildsKey, findCatalogEntryForLocal, findInstalledAlias, gitAllowBuildsKey, installTargetFor, isLocalSpec, NPM_NAME_RE, repoOfTarget, restoreBlockedByWorkspace, restoreTargetForLocal, workspaceProtocolDeps } from './sources.ts'
+import { codeloadAllowBuildsKey, findCatalogEntryForLocal, findInstalledAlias, githubCommitOfTarget, githubTargetAtCommit, gitAllowBuildsKey, installTargetFor, isLocalSpec, NPM_NAME_RE, repoOfTarget, restoreBlockedByWorkspace, restoreTargetForLocal, workspaceProtocolDeps } from './sources.ts'
 import { failureDetail, groupConflictsByOwner, isStaleUpdate, parseIgnoredBuilds, parsePrepareNotAllowed, RELEASE_AGE_OVERRIDE, retargetCollections, validateAddedPlugins, withHoistRecovery } from './install.ts'
 import { asChannel, CHANNELS, DIST_TAG, resolveChannel, type Channel } from './channels.ts'
 import { asRegion, REGIONS, routesFor, setActiveRegion, type Region } from './regions.ts'
@@ -514,8 +514,12 @@ export function mountMarketRoutes(
     if (beforeCommit === null) {
       return { ok: false, detail: 'the previous commit is unknown; nothing to roll back to' }
     }
+    const rollbackTarget = githubTargetAtCommit(target, beforeCommit)
+    if (rollbackTarget === null) {
+      return { ok: false, detail: 'the previous github target is invalid; nothing to roll back to' }
+    }
     restoreProfileManifest(config.profile, manifestBefore, activeProfileDir)
-    const add = await runPlugin(config.profile, ['add', RELEASE_AGE_OVERRIDE, `${target}#${beforeCommit}`])
+    const add = await runPlugin(config.profile, ['add', RELEASE_AGE_OVERRIDE, rollbackTarget])
     if (add.exitCode !== 0 || add.timedOut || add.cancelled) {
       return { ok: false, detail: failureDetail(add) }
     }
@@ -2069,19 +2073,18 @@ export function mountMarketRoutes(
             const beforeInstalled = readInstalled(config.profile, activeProfileDir)
             // Re-running add re-resolves the source: git HEAD for github specs,
             // dist-tag latest for registry installs.
-            // A GitHub source in EITHER spelling. Under a download region
-            // that mirrors GitHub, an installed plugin carries a proxied
-            // codeload URL rather than the `github:` shortcut, and asking
-            // only about the shortcut sent those down the npm path below —
+            // A GitHub source in EITHER spelling. A legacy regional install
+            // can carry a proxied codeload URL rather than the `github:`
+            // shortcut, and asking only about the shortcut sent those down
+            // the npm path below —
             // where `name@latest` either fails or, far worse, installs an
             // unrelated package that happens to share the plugin's name.
             // The `github:` shortcut keeps its own handling, fragments and
             // all — `githubUpdateTarget` is what preserves a monorepo
             // `#path:` while dropping revision selectors (#281).
             //
-            // A proxied codeload URL is the OTHER spelling of the same
-            // source, carried by anything installed under a region that
-            // mirrors GitHub. It has no fragment to preserve (subpath entries
+            // A proxied codeload URL is the legacy spelling of the same
+            // source. It has no fragment to preserve (subpath entries
             // are never accelerated), so the canonical shortcut is rebuilt
             // from it. Without this branch these fell through to the npm path
             // below, where `name@latest` either fails or — far worse —
@@ -2145,7 +2148,7 @@ export function mountMarketRoutes(
                 return
               }
             }
-            const repoKey = isGit ? spec.slice('github:'.length).replace(/#.*$/, '').toLowerCase() : null
+            const repoKey = isGit ? repoOfTarget(spec)?.split('#')[0] ?? null : null
             // Captured BEFORE pnpm replaces the files: afterwards the loader
             // inventory reads exactly the same, because replacing a package
             // on disk does not unload the module the process already imported.
@@ -2156,7 +2159,7 @@ export function mountMarketRoutes(
               && hasHostHalf(config.profile, name, activeProfileDir)
             const beforeVersion = readInstalledVersion(config.profile, name, activeProfileDir)
             const beforeCommit = repoKey !== null
-              ? readLockCommits(config.profile, activeProfileDir).get(repoKey) ?? null
+              ? githubCommitOfTarget(spec) ?? readLockCommits(config.profile, activeProfileDir).get(repoKey) ?? null
               : null
             // force: the user chose to install a fresh release without the
             // default one-day safety wait; scoped to this single command.
@@ -2734,7 +2737,7 @@ export function mountMarketRoutes(
           /**
            * Both key forms for one github source (#285).
            *
-           * pnpm 11.21+ matches the stable `git+https://…` key; 11.7.0 — what
+           * pnpm 11.21+ matches the stable `git+https://…` key; 11.8.0 — what
            * DSH Desktop bundles — matches only a commit-pinned codeload URL,
            * so on those versions the approval button wrote a key pnpm would
            * never read and could never work. The pin is resolved here rather
@@ -2749,9 +2752,9 @@ export function mountMarketRoutes(
             const stable = gitAllowBuildsKey(name, spec)
             if (stable === null) return []
             const repo = repoOfTarget(spec)?.split('#')[0] ?? null
-            // A proxied install already carries its commit; only a bare
-            // shortcut has to go and ask.
-            const pinned = /codeload\.github\.com\/[^/\s]+\/[^/\s]+\/tar\.gz\/([0-9a-f]{40})/.exec(spec)?.[1]
+            // A proxied legacy install and the mirror-resolved github form
+            // both already carry their commit; only a bare shortcut asks.
+            const pinned = githubCommitOfTarget(spec)
               ?? (repo === null ? null : await resolveHeadCommit(repo, region))
             const codeload = pinned === null || pinned === undefined
               ? null
@@ -3084,15 +3087,14 @@ export function mountMarketRoutes(
               sendJson(response, 400, { error: 'unsupported source url' })
               return
             }
-            // Route a GitHub download through the region's mirror, when there
-            // is one and the target can express it. Applied HERE, before the
-            // guards below, so every step downstream reasons about the spec
-            // that will actually be installed — the duplicate guard and the
-            // build-script key both read targets, and both understand either
-            // spelling. Returns the original on any failure (see accelerate.ts).
+            // Resolve GitHub HEAD through the region's mirror, when there is
+            // one, then let pnpm fetch the canonical commit-pinned target.
+            // Applied HERE, before the guards below, so every step downstream
+            // reasons about the exact spec that will be installed. Returns
+            // the original on any lookup failure (see accelerate.ts).
             const target = await acceleratedTarget(plainTarget, region)
             if (target !== plainTarget) {
-              logEvent('info', 'region', `${entry.name}: downloading through the ${region} mirror`)
+              logEvent('info', 'region', `${entry.name}: resolved HEAD through the ${region} mirror; downloading the commit-pinned GitHub target directly for pnpm integrity`)
             }
             // Duplicate guard (#27): the same plugin listed under another name
             // (an alias entry pointing at the same repo) must never install
@@ -3117,11 +3119,11 @@ export function mountMarketRoutes(
               // are about to add — an npm entry retries under its npm name; a
               // github entry's package.json spec equals the target.
               // Compared as IDENTITIES, not as strings. One GitHub plugin has
-              // two spellings depending on the download region — the
-              // `github:` shortcut and a proxied codeload tarball — so a
-              // literal comparison would call a leftover from before a region
-              // switch "a different source" and refuse the retry it exists to
-              // allow. `repoOfTarget` returns null for npm names and file
+              // several historical spellings — mutable or pinned `github:`
+              // shortcuts and legacy proxied codeload tarballs — so a literal
+              // comparison would call a leftover from before an upgrade or
+              // region switch "a different source" and refuse the retry it
+              // exists to allow. `repoOfTarget` returns null for npm names and file
               // links, which fall through to the string comparison below.
               const installedSpec = String(installedNow[aliasOf] ?? '').replace(/^file:/, '')
               const wantedSpec = String(target).replace(/^file:/, '')

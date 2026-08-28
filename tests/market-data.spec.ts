@@ -217,6 +217,12 @@ describe('matchInstalledName / isInstalled', () => {
     expect(matchInstalledName(root, installed, repoIdentities)).toBe('plugin-a')
     expect(matchInstalledName(exact, installed, repoIdentities)).toBe('plugin-a')
     expect(matchInstalledName(sibling, installed, repoIdentities)).toBeNull()
+
+    const sha = 'b0e6c57ebeeb4796017864f5cd5c66e6ba0899ec'
+    const pinned = { 'plugin-a': `github:o/collection#${sha}&path:/packages/plugin-a` }
+    expect(matchInstalledName(root, pinned)).toBe('plugin-a')
+    expect(matchInstalledName(exact, pinned)).toBe('plugin-a')
+    expect(matchInstalledName(sibling, pinned)).toBeNull()
   })
 })
 

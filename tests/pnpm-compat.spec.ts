@@ -42,6 +42,9 @@ describe('classifyPnpmFailure', () => {
     const hoist = classifyPnpmFailure('ERR_PNPM_PUBLIC_HOIST_PATTERN_DIFF  This modules directory was created using a different public-hoist-pattern value. Run "pnpm install" to recreate the modules directory.')
     expect(hoist?.code).toBe('hoist-pattern-diff')
     expect(hoist?.recoverable).toBe(true)
+    const windowsLayout = classifyPnpmFailure('ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF This modules directory was created using a different virtual-store-dir-max-length value. Run "pnpm install" to recreate the modules directory.')
+    expect(windowsLayout?.code).toBe('hoist-pattern-diff')
+    expect(windowsLayout?.recoverable).toBe(true)
 
     const root = classifyPnpmFailure('ERR_PNPM_ADDING_TO_ROOT  Running this command will add the dependency to the workspace root')
     expect(root?.code).toBe('adding-to-root')
