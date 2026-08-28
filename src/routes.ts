@@ -979,13 +979,15 @@ export function mountMarketRoutes(
         try {
           const body = (await readJsonBody(request)) as { operationId?: unknown }
           const operationId = typeof body.operationId === 'string' ? body.operationId : ''
+          const trackedOperation = operationsV1.get(operationId)
           const legacyRollbackId = operationsV1.beginRollback(operationId)
-          if (legacyRollbackId === null) {
+          if (legacyRollbackId === null || trackedOperation === null) {
             sendJson(response, 409, { schema: UPDATE_API_V1_SCHEMA, error: 'rollback is not available for this operation' })
             return
           }
           const result = await invokeLegacy('/dsh-market/rollback', request, 'POST', { rollbackId: legacyRollbackId })
-          const operation = operationsV1.finishRollback(operationId, result.status, result.payload)
+          const installedVersion = readInstalledVersion(config.profile, trackedOperation.packageName, activeProfileDir)
+          const operation = operationsV1.finishRollback(operationId, result.status, result.payload, installedVersion)
           sendJson(response, 200, { schema: UPDATE_API_V1_SCHEMA, operation })
         } catch (error) {
           sendJson(response, 400, {
