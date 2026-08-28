@@ -167,13 +167,18 @@ export function respawnInvocation(
     return { file: launch.file, args: launch.args, viaShell: launch.viaShell, detached: true }
   }
   // PowerShell single-quoting: only embedded single quotes need escaping
-  // (doubled). The & call operator runs .exe/.cmd/.bat alike, so the
-  // original viaShell (cmd-shim) case needs no extra shell.
+  // (doubled). Name the cmd shim explicitly: invoking bare `dsh` lets
+  // PowerShell prefer dsh.ps1, which a default Restricted execution policy
+  // refuses before the replacement can start (#397). `dsh.cmd` is produced
+  // by the same npm install and is not governed by PowerShell script policy.
   const quote = (part: string): string => `'${part.replace(/'/g, "''")}'`
+  const file = launch.viaShell && !/\.(?:cmd|bat)$/iu.test(launch.file)
+    ? `${launch.file}.cmd`
+    : launch.file
   return {
     file: 'powershell.exe',
     args: ['-NoProfile', '-WindowStyle', 'Hidden', '-Command',
-      [`& ${quote(launch.file)}`, ...launch.args.map(quote)].join(' ')],
+      [`& ${quote(file)}`, ...launch.args.map(quote)].join(' ')],
     viaShell: false,
     detached: false,
   }

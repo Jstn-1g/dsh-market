@@ -31,6 +31,11 @@ describe('respawnInvocation (#40)', () => {
     expect(spawned.args[4]).toBe("& 'C:\\it''s here\\dsh.cmd'")
   })
 
+  it('names the cmd shim explicitly so Restricted policy cannot select dsh.ps1 (#397)', () => {
+    const spawned = respawnInvocation({ file: 'dsh', args: ['web'], viaShell: true }, 'win32')
+    expect(spawned.args[4]).toBe("& 'dsh.cmd' 'web'")
+  })
+
   it('keeps the plain detached spawn on POSIX', () => {
     const spawned = respawnInvocation({ file: 'node', args: ['bin.ts'], viaShell: false }, 'darwin')
     expect(spawned).toEqual({ file: 'node', args: ['bin.ts'], viaShell: false, detached: true })
