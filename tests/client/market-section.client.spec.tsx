@@ -1227,12 +1227,17 @@ describe('plugin notes (#347)', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Installed/ }))
     expect(await screen.findByText('Loop task runner')).toBeTruthy()
 
-    fireEvent.click(screen.getByRole('button', { name: en.noteAdd }))
+    const addNote = screen.getByRole('button', { name: en.noteAdd })
+    // #399: this must read as an action, not as a third piece of the author
+    // description. The original/mine toggle deliberately remains quiet text.
+    expect(addNote.className).toMatch(/noteAction/)
+    fireEvent.click(addNote)
     fireEvent.change(screen.getByPlaceholderText(en.notePlaceholder), { target: { value: 'for project A' } })
     fireEvent.click(screen.getByRole('button', { name: en.noteSave }))
 
     // The note takes the description's place rather than sitting beside it.
-    expect(await screen.findByText('for project A')).toBeTruthy()
+    expect((await screen.findByText('for project A')).className).toMatch(/noteMine/)
+    expect(screen.getByRole('button', { name: en.noteEdit }).className).toMatch(/noteAction/)
     await waitFor(() => expect(screen.queryByText('Loop task runner')).toBeNull())
   })
 

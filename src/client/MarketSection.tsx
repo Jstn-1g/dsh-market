@@ -3958,7 +3958,7 @@ export function MarketSection(props: MarketSectionProps) {
                                             )}
                                             <button
                                               type="button"
-                                              className={css.noteToggle}
+                                              className={`${css.noteToggle} ${css.noteAction}`}
                                               title={note === undefined ? t('noteAdd') : t('noteEdit')}
                                               aria-label={note === undefined ? t('noteAdd') : t('noteEdit')}
                                               onClick={() => { setNoteDraft(note ?? ''); setNotingName(name) }}
