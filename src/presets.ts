@@ -15,7 +15,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { readMarketState, writeMarketState } from './hot.ts'
 import { applyBundleOrder, mergeOrder, readBundleRules, readBundleStack, validateOrder } from './order.ts'
-import { createProfileSnapshot, DEFAULT_MAX_SNAPSHOTS } from './snapshot.ts'
+import { createProfileSnapshot, DEFAULT_MAX_SNAPSHOTS, SNAPSHOT_CAPTURE_ERROR } from './snapshot.ts'
 import { trialValidate, type TrialDiff, type TrialIssue } from './trial.ts'
 import { logEvent } from './log.ts'
 
@@ -306,6 +306,10 @@ export function applyPreset(profileDir: string, name: unknown, maxSnapshots: num
 
   const preview = previewPreset(profileDir, name)
   const snapshot = createProfileSnapshot(profileDir, maxSnapshots)
+  if (snapshot === null) {
+    logEvent('error', 'preset', `apply "${name}" refused: ${SNAPSHOT_CAPTURE_ERROR}`)
+    return { ok: false, error: SNAPSHOT_CAPTURE_ERROR }
+  }
   const ordered = applyBundleOrder(profileDir, preset.bundleOrder)
   if (!ordered.ok) {
     return { ok: false, error: ordered.error }
@@ -320,8 +324,8 @@ export function applyPreset(profileDir: string, name: unknown, maxSnapshots: num
   }
   state.disabled = new Set(filtered)
   writeMarketState(profileDir, state)
-  logEvent('info', 'preset', `applied "${name}"${snapshot !== null ? ` (snapshot ${snapshot.id})` : ''}`)
-  return { ok: true, snapshot: snapshot?.id, changes: preview.ok ? preview.changes : undefined }
+  logEvent('info', 'preset', `applied "${name}" (snapshot ${snapshot.id})`)
+  return { ok: true, snapshot: snapshot.id, changes: preview.ok ? preview.changes : undefined }
 }
 
 /*

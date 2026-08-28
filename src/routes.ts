@@ -31,7 +31,7 @@ import { runningAgentIds, type AgentsLookup } from './agents.ts'
 import { analyzeProfile, type DuplicateName } from './check.ts'
 import { applyBundleOrder, mergeOrder, readBundleRules, readBundleStack, validateOrder } from './order.ts'
 import { applyPreset, deletePreset, listPresets, previewPreset, savePreset } from './presets.ts'
-import { createProfileSnapshot, DEFAULT_MAX_SNAPSHOTS, deleteSnapshot, listSnapshots, restoreSnapshot } from './snapshot.ts'
+import { createProfileSnapshot, DEFAULT_MAX_SNAPSHOTS, deleteSnapshot, listSnapshots, restoreSnapshot, SNAPSHOT_CAPTURE_ERROR } from './snapshot.ts'
 import { trialValidate } from './trial.ts'
 import { codeloadAllowBuildsKey, findCatalogEntryForLocal, findInstalledAlias, githubCommitOfTarget, githubTargetAtCommit, gitAllowBuildsKey, installTargetFor, isLocalSpec, NPM_NAME_RE, repoOfTarget, restoreBlockedByWorkspace, restoreTargetForLocal, workspaceProtocolDeps } from './sources.ts'
 import { failureDetail, groupConflictsByOwner, isStaleUpdate, parseIgnoredBuilds, parsePrepareNotAllowed, RELEASE_AGE_OVERRIDE, retargetCollections, validateAddedPlugins, withHoistRecovery } from './install.ts'
@@ -1336,14 +1336,18 @@ export function mountMarketRoutes(
               // recoverable from the snapshots tab; the in-process backup above
               // stays as the immediate rollback net (double protection).
               const snapshot = createProfileSnapshot(activeProfileDir, maxSnapshots)
+              if (snapshot === null) {
+                sendJson(response, 400, { error: SNAPSHOT_CAPTURE_ERROR })
+                return
+              }
               const applied = applyBundleOrder(activeProfileDir, order)
               if (!applied.ok) {
                 sendJson(response, 400, { error: applied.error })
                 return
               }
               invalidateUpdates()
-              logEvent('info', 'bundle-order', 'applied new community order' + (snapshot !== null ?  (snapshot ) : ''))
-              sendJson(response, 200, { ok: true, bundles: applied.bundles, snapshot: snapshot?.id ?? null })
+              logEvent('info', 'bundle-order', `applied new community order (snapshot ${snapshot.id})`)
+              sendJson(response, 200, { ok: true, bundles: applied.bundles, snapshot: snapshot.id })
           })
         } catch (error) {
           // The write threw mid-flight: restore the pre-write profile so a
@@ -1451,7 +1455,7 @@ export function mountMarketRoutes(
                 ok: snapshot !== null,
                 ...(snapshot !== null
                   ? { snapshot }
-                  : { error: 'profile package.json is missing or unparseable / profile 的 package.json 缺失或无法解析' }),
+                  : { error: SNAPSHOT_CAPTURE_ERROR }),
               })
             })
           } catch (error) {

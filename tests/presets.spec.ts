@@ -208,6 +208,23 @@ describe('applyPreset', () => {
     expect(state.disabled).toEqual(['new-disabled'])
   })
 
+  it('refuses to apply when the full pre-write composition cannot be captured', () => {
+    const dir = pdir()
+    writeProfile(dir, ['alpha', 'beta'])
+    writeBundle(dir, 'alpha', '1.0.0', [{ insert: [{ id: 'alpha-entry', name: 'alpha' }] }])
+    writeBundle(dir, 'beta', '1.0.0', [{ insert: [{ id: 'beta-entry', name: 'beta' }] }])
+    writePresetFile(dir, [{ name: 'good', bundleOrder: ['beta', 'alpha'], disabled: [], createdAt: 1 }])
+    writeFileSync(join(dir, '.dsh-market', 'state.json'), '{ broken')
+    const before = readFileSync(join(dir, 'package.json'), 'utf8')
+
+    const result = applyPreset(dir, 'good')
+    expect(result.ok).toBe(false)
+    expect(result.error).toMatch(/composition could not be captured/)
+    expect(readFileSync(join(dir, 'package.json'), 'utf8')).toBe(before)
+    expect(readFileSync(join(dir, '.dsh-market', 'state.json'), 'utf8')).toBe('{ broken')
+    expect(existsSync(join(dir, '.dsh-market', 'snapshots'))).toBe(false)
+  })
+
   it('reports missing presets and invalid names', () => {
     const dir = pdir()
     writeProfile(dir, ['alpha'])

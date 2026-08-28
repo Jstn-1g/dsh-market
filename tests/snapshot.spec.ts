@@ -4,8 +4,8 @@
  * tmpdir fixtures (same pattern as tests/check.spec.ts).
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -85,11 +85,47 @@ describe('createProfileSnapshot', () => {
     expect(createProfileSnapshot(dir)).toBeNull()
   })
 
+  it('does not mislabel an existing but unparseable optional file as absent', () => {
+    const dir = pdir()
+    writeProfile(dir, SAMPLE_MANIFEST)
+    mkdirSync(join(dir, '.dsh-market'), { recursive: true })
+    writeFileSync(join(dir, '.dsh-market', 'state.json'), '{ broken')
+
+    expect(createProfileSnapshot(dir)).toBeNull()
+    expect(existsSync(snapshotsDir(dir))).toBe(false)
+  })
+
+  it('does not mislabel an existing but unreadable optional path as absent', () => {
+    const dir = pdir()
+    writeProfile(dir, SAMPLE_MANIFEST)
+    mkdirSync(join(dir, 'cordis.patch.yml'))
+
+    expect(createProfileSnapshot(dir)).toBeNull()
+    expect(existsSync(snapshotsDir(dir))).toBe(false)
+  })
+
+  it('does not mislabel a dangling optional-file symlink as absent', () => {
+    const dir = pdir()
+    writeProfile(dir, SAMPLE_MANIFEST)
+    symlinkSync(join(dir, 'missing-cordis.patch.yml'), join(dir, 'cordis.patch.yml'), 'file')
+
+    expect(createProfileSnapshot(dir)).toBeNull()
+    expect(existsSync(snapshotsDir(dir))).toBe(false)
+  })
+
   it('still snapshots when the optional files are absent', () => {
     const dir = pdir()
     writeProfile(dir, SAMPLE_MANIFEST)
     const snapshot = createProfileSnapshot(dir)
-    expect(snapshot?.files.map(f => f.path)).toEqual(['package.json'])
+    expect(snapshot).toMatchObject({
+      format: 'dsh-market/profile-snapshot',
+      version: 2,
+      files: [
+        { path: 'package.json', json: SAMPLE_MANIFEST },
+        { path: 'cordis.patch.yml', absent: true },
+        { path: '.dsh-market/state.json', absent: true },
+      ],
+    })
   })
 
   it('assigns distinct ids to consecutive snapshots', () => {
@@ -160,16 +196,147 @@ describe('restoreSnapshot', () => {
     expect(JSON.parse(readFileSync(join(dir, '.dsh-market', 'state.json'), 'utf8'))).toEqual({ disabled: ['p1'], groups: {}, groupOrder: [] })
   })
 
-  it('restores a snapshot containing only package.json', () => {
+  it('removes optional composition files created after a v2 snapshot', () => {
     const dir = pdir()
     writeProfile(dir, SAMPLE_MANIFEST)
     const snapshot = createProfileSnapshot(dir)
     writeProfile(dir, { name: 'changed' })
+    mkdirSync(join(dir, '.dsh-market'), { recursive: true })
+    writeFileSync(join(dir, 'cordis.patch.yml'), '- insert:\n  - id: later\n')
+    writeFileSync(join(dir, '.dsh-market', 'state.json'), JSON.stringify({ disabled: ['later'] }))
 
     const result = restoreSnapshot(dir, snapshot?.id ?? '')
     expect(result.ok).toBe(true)
-    expect(result.restored).toEqual(['package.json'])
+    expect(result.restored).toEqual(['package.json', 'cordis.patch.yml', '.dsh-market/state.json'])
     expect(JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))).toEqual(SAMPLE_MANIFEST)
+    expect(existsSync(join(dir, 'cordis.patch.yml'))).toBe(false)
+    expect(existsSync(join(dir, '.dsh-market', 'state.json'))).toBe(false)
+  })
+
+  it('preserves later optional files when restoring a legacy package-only snapshot', () => {
+    const dir = pdir()
+    writeProfile(dir, SAMPLE_MANIFEST)
+    mkdirSync(snapshotsDir(dir), { recursive: true })
+    writeFileSync(join(snapshotsDir(dir), 'snapshot-legacy.json'), JSON.stringify({
+      id: 'snapshot-legacy',
+      createdAt: 1,
+      files: [{ path: 'package.json', json: SAMPLE_MANIFEST }],
+    }))
+    writeProfile(dir, { name: 'changed' })
+    mkdirSync(join(dir, '.dsh-market'), { recursive: true })
+    writeFileSync(join(dir, 'cordis.patch.yml'), 'later patch\n')
+    writeFileSync(join(dir, '.dsh-market', 'state.json'), JSON.stringify({ disabled: ['later'] }))
+
+    const result = restoreSnapshot(dir, 'snapshot-legacy')
+    expect(result.ok).toBe(true)
+    expect(result.restored).toEqual(['package.json'])
+    expect(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')).toBe('later patch\n')
+    expect(JSON.parse(readFileSync(join(dir, '.dsh-market', 'state.json'), 'utf8'))).toEqual({ disabled: ['later'] })
+  })
+
+  it('rejects malformed v2 documents before mutating the profile', () => {
+    const dir = pdir()
+    writeProfile(dir, { name: 'current' })
+    mkdirSync(snapshotsDir(dir), { recursive: true })
+    const packageEntry = { path: 'package.json', json: SAMPLE_MANIFEST }
+    const patchEntry = { path: 'cordis.patch.yml', lines: SAMPLE_PATCH.split('\n') }
+    const stateEntry = { path: '.dsh-market/state.json', json: { disabled: [] } }
+    const cases: Array<{ id: string; version?: number; files: unknown[] }> = [
+      { id: 'snapshot-missing-path', files: [packageEntry, patchEntry] },
+      { id: 'snapshot-duplicate-path', files: [packageEntry, packageEntry, patchEntry, stateEntry] },
+      { id: 'snapshot-absent-package', files: [{ path: 'package.json', absent: true }, patchEntry, stateEntry] },
+      { id: 'snapshot-mixed-representation', files: [packageEntry, { path: 'cordis.patch.yml', lines: [], absent: true }, stateEntry] },
+      { id: 'snapshot-invalid-lines', files: [packageEntry, { path: 'cordis.patch.yml', lines: [42] }, stateEntry] },
+      { id: 'snapshot-unknown-version', version: 99, files: [packageEntry, patchEntry, stateEntry] },
+    ]
+
+    for (const candidate of cases) {
+      writeFileSync(join(snapshotsDir(dir), `${candidate.id}.json`), JSON.stringify({
+        format: 'dsh-market/profile-snapshot',
+        version: candidate.version ?? 2,
+        id: candidate.id,
+        createdAt: 1,
+        files: candidate.files,
+      }))
+      const before = readFileSync(join(dir, 'package.json'), 'utf8')
+      expect(restoreSnapshot(dir, candidate.id).ok, candidate.id).toBe(false)
+      expect(readFileSync(join(dir, 'package.json'), 'utf8'), candidate.id).toBe(before)
+    }
+    expect(listSnapshots(dir)).toEqual([])
+  })
+
+  it('recreates an earlier deletion when a later atomic write fails', () => {
+    const dir = pdir()
+    writeProfile(dir, SAMPLE_MANIFEST)
+    mkdirSync(join(dir, '.dsh-market'), { recursive: true })
+    writeFileSync(join(dir, '.dsh-market', 'state.json'), JSON.stringify({ disabled: ['old'] }))
+    const snapshot = createProfileSnapshot(dir)
+    expect(snapshot).not.toBeNull()
+
+    const changedManifest = JSON.stringify({ name: 'changed' }, null, 2)
+    const changedPatch = 'later patch\n'
+    const changedState = JSON.stringify({ disabled: ['later'] })
+    writeFileSync(join(dir, 'package.json'), changedManifest)
+    writeFileSync(join(dir, 'cordis.patch.yml'), changedPatch)
+    writeFileSync(join(dir, '.dsh-market', 'state.json'), changedState)
+
+    const now = 123456789
+    const random = 0.5
+    const blocker = `${join(dir, '.dsh-market', 'state.json')}.tmp-${process.pid}-${now}-${random.toString(36).slice(2, 8)}`
+    mkdirSync(blocker)
+    vi.spyOn(Date, 'now').mockReturnValue(now)
+    vi.spyOn(Math, 'random').mockReturnValue(random)
+    try {
+      const result = restoreSnapshot(dir, snapshot?.id ?? '')
+      expect(result.ok).toBe(false)
+      expect(readFileSync(join(dir, 'package.json'), 'utf8')).toBe(changedManifest)
+      expect(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')).toBe(changedPatch)
+      expect(readFileSync(join(dir, '.dsh-market', 'state.json'), 'utf8')).toBe(changedState)
+    } finally {
+      vi.restoreAllMocks()
+      rmSync(blocker, { recursive: true, force: true })
+    }
+    expect(readdirSync(dir).some(name => name.includes('.tmp-'))).toBe(false)
+    expect(readdirSync(join(dir, '.dsh-market')).some(name => name.includes('.tmp-'))).toBe(false)
+  })
+
+  it('reports when a later failure also prevents an earlier deletion from rolling back', () => {
+    const dir = pdir()
+    writeProfile(dir, SAMPLE_MANIFEST)
+    mkdirSync(join(dir, '.dsh-market'), { recursive: true })
+    writeFileSync(join(dir, '.dsh-market', 'state.json'), JSON.stringify({ disabled: ['old'] }))
+    const snapshot = createProfileSnapshot(dir)
+    expect(snapshot).not.toBeNull()
+
+    const changedManifest = JSON.stringify({ name: 'changed' }, null, 2)
+    const changedPatch = 'later patch\n'
+    const changedState = JSON.stringify({ disabled: ['later'] })
+    writeFileSync(join(dir, 'package.json'), changedManifest)
+    writeFileSync(join(dir, 'cordis.patch.yml'), changedPatch)
+    writeFileSync(join(dir, '.dsh-market', 'state.json'), changedState)
+
+    const now = 123456790
+    const random = 0.25
+    const suffix = `.tmp-${process.pid}-${now}-${random.toString(36).slice(2, 8)}`
+    const rollbackBlocker = `${join(dir, 'cordis.patch.yml')}${suffix}`
+    const laterWriteBlocker = `${join(dir, '.dsh-market', 'state.json')}${suffix}`
+    mkdirSync(rollbackBlocker)
+    mkdirSync(laterWriteBlocker)
+    vi.spyOn(Date, 'now').mockReturnValue(now)
+    vi.spyOn(Math, 'random').mockReturnValue(random)
+    try {
+      const result = restoreSnapshot(dir, snapshot?.id ?? '')
+      expect(result.ok).toBe(false)
+      expect(result.restored).toEqual([])
+      expect(result.error).toContain('rollback incomplete')
+      expect(readFileSync(join(dir, 'package.json'), 'utf8')).toBe(changedManifest)
+      expect(existsSync(join(dir, 'cordis.patch.yml'))).toBe(false)
+      expect(readFileSync(join(dir, '.dsh-market', 'state.json'), 'utf8')).toBe(changedState)
+    } finally {
+      vi.restoreAllMocks()
+      rmSync(rollbackBlocker, { recursive: true, force: true })
+      rmSync(laterWriteBlocker, { recursive: true, force: true })
+    }
   })
 
   it('refuses traversal and absolute paths before writing anything', () => {
