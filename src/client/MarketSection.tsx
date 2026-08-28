@@ -2167,7 +2167,7 @@ export function MarketSection(props: MarketSectionProps) {
     setNotesFor({ name, current, latest, repoUrl })
     setUpdateNotes(null)
     setNotesState('loading')
-    fetch(`/dsh-market/changelog?name=${encodeURIComponent(name)}`)
+    fetch(`${api('/dsh-market/changelog')}?name=${encodeURIComponent(name)}`)
       .then(res => res.json())
       .then(body => { setUpdateNotes(body as ResolvedNotes); setNotesState('ready') })
       .catch(() => setNotesState('fail'))
@@ -2205,7 +2205,7 @@ export function MarketSection(props: MarketSectionProps) {
   /** Write (or clear, when empty) this plugin's note. */
   const saveNote = useCallback((name: string, text: string) => {
     setNotingName(null)
-    fetch('/dsh-market/note', {
+    fetch(api('/dsh-market/note'), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name, text }),

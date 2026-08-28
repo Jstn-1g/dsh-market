@@ -27,22 +27,25 @@ const REGISTRY = {
 /** Every fetch the component made, for asserting request payloads. */
 let fetchCalls: Array<{ path: string; method: string; body: unknown }> = []
 
-function stubFetch(overrides: Record<string, unknown> = {}) {
+function stubFetch(overrides: Record<string, unknown> = {}, mountPath = '') {
   fetchCalls = []
   const mock = vi.fn((input: unknown, init?: RequestInit) => {
     const path = String(input).split('?')[0]
+    const route = mountPath !== '' && path.startsWith(`${mountPath}/`)
+      ? path.slice(mountPath.length)
+      : path
     const method = (init?.method ?? 'GET').toUpperCase()
     const body = init?.body ? JSON.parse(String(init.body)) : undefined
     fetchCalls.push({ path, method, body })
     const payload =
-      path === '/dsh-market/registry' ? { source: 'live', registry: REGISTRY }
-      : path === '/dsh-market/installed' ? { profile: 'web', installed: {}, live: [], disabled: [], groups: {}, groupOrder: [] }
-      : path === '/dsh-market/status' ? { active: false, pnpm: true, boot: 'boot-1', restart: true, installed: {} }
-      : path === '/dsh-market/updates' ? { updates: {} }
-      : path === '/dsh-market/toggle' ? { ok: true, disabled: [], live: [], activation: {} }
-      : path === '/dsh-market/groups' ? { ok: true, groups: {}, groupOrder: [], disabled: [] }
+      route === '/dsh-market/registry' ? { source: 'live', registry: REGISTRY }
+      : route === '/dsh-market/installed' ? { profile: 'web', installed: {}, live: [], disabled: [], groups: {}, groupOrder: [] }
+      : route === '/dsh-market/status' ? { active: false, pnpm: true, boot: 'boot-1', restart: true, installed: {} }
+      : route === '/dsh-market/updates' ? { updates: {} }
+      : route === '/dsh-market/toggle' ? { ok: true, disabled: [], live: [], activation: {} }
+      : route === '/dsh-market/groups' ? { ok: true, groups: {}, groupOrder: [], disabled: [] }
       : null
-    const merged = overrides[path] ?? payload
+    const merged = overrides[path] ?? overrides[route] ?? payload
     if (merged === null) return Promise.reject(new Error(`unstubbed fetch: ${String(input)}`))
     const result = typeof merged === 'function' ? (merged as (requestBody?: unknown) => unknown)(body) : merged
     const status = result !== null && typeof result === 'object' && '__status' in result && typeof (result as { __status?: unknown }).__status === 'number'
@@ -124,6 +127,65 @@ describe('api() base resolution (#345)', () => {
     // Arbitrary depth, and a leading slash in the argument is not special.
     tag.setAttribute('href', 'http://host.example/user/a/b/')
     expect(api('dsh-market/status')).toBe('/user/a/b/dsh-market/status')
+  })
+
+  it('keeps newer changelog and note requests under that prefix too', async () => {
+    const tag = document.createElement('base')
+    tag.setAttribute('href', 'http://host.example/app/my-dsh/')
+    document.head.appendChild(tag)
+    const fetchMock = stubFetch({
+      '/dsh-market/installed': {
+        profile: 'web',
+        installed: { 'dsh-loop': '^1.0.0' },
+        live: ['dsh-loop'],
+        disabled: [],
+        notes: {},
+      },
+      '/dsh-market/updates': {
+        updates: {
+          'dsh-loop': {
+            kind: 'npm', version: '1.0.0', current: '1.0.0', latest: '1.2.0', updateAvailable: true,
+          },
+        },
+      },
+      '/dsh-market/changelog': {
+        kind: 'release',
+        release: {
+          tag: 'v1.2.0', name: 'Subpath release', publishedAt: null, url: null, body: 'Subpath release notes',
+        },
+      },
+      '/dsh-market/note': (body: any) => ({
+        ok: true,
+        notes: { [body.name]: String(body.text).trim() },
+      }),
+    }, '/app/my-dsh')
+
+    render(<MarketSection {...props()} />)
+    await screen.findByText('dsh-loop')
+    fireEvent.click(screen.getByRole('button', { name: /Installed/ }))
+
+    fireEvent.click(await screen.findByRole('button', { name: en.noteAdd }))
+    fireEvent.change(screen.getByPlaceholderText(en.notePlaceholder), { target: { value: 'for project A' } })
+    fireEvent.click(screen.getByRole('button', { name: en.noteSave }))
+    expect(await screen.findByText('for project A')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: new RegExp(en.notesLink) }))
+    expect(await screen.findByText('Subpath release notes')).toBeTruthy()
+
+    expect(fetchCalls).toContainEqual({
+      path: '/app/my-dsh/dsh-market/note',
+      method: 'POST',
+      body: { name: 'dsh-loop', text: 'for project A' },
+    })
+    expect(fetchCalls).toContainEqual({
+      path: '/app/my-dsh/dsh-market/changelog',
+      method: 'GET',
+      body: undefined,
+    })
+    expect(fetchCalls.some(call => call.path === '/dsh-market/note')).toBe(false)
+    expect(fetchCalls.some(call => call.path === '/dsh-market/changelog')).toBe(false)
+    expect(fetchMock.mock.calls.some(([url]) =>
+      url === '/app/my-dsh/dsh-market/changelog?name=dsh-loop')).toBe(true)
   })
 })
 
