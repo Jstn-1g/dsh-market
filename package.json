@@ -31,7 +31,8 @@
     "prepare": "npm run build",
     "validate:registry": "node scripts/validate-registry.mjs",
     "snapshot": "curl -sf https://awesome-dsh-plugin.com/plugins.json -o data/registry-snapshot.json && curl -sf https://awesome-dsh-plugin.com/readmes.json -o data/readmes-snapshot.json",
-    "test:web": "vitest run --config vitest.web.config.ts",
+    "check:web-auth-capture": "node scripts/check-web-auth-capture.mjs",
+    "test:web": "node scripts/check-web-auth-capture.mjs && vitest run --config vitest.web.config.ts",
     "build:site": "node scripts/build-site.mjs"
   },
   "dependencies": {
