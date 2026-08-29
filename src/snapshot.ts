@@ -18,7 +18,7 @@
  * individually from the UI.
  */
 
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { logEvent } from './log.ts'
 
@@ -239,10 +239,68 @@ export const SNAPSHOT_CAPTURE_ERROR = [
  * @returns the ids that were deleted.
  */
 export function pruneSnapshots(profileDir: string, max: number): string[] {
+  return pruneSnapshotsKeeping(profileDir, max)
+}
+
+/** Refuse an existing parent that could redirect a restore outside the profile. */
+function ensureSafeRestoreParent(profileDir: string, parent: string, snapshotPath: string): void {
+  const root = resolve(profileDir)
+  const relativeParent = relative(root, resolve(parent))
+  if (relativeParent === '') return
+  if (isAbsolute(relativeParent) || relativeParent === '..' || relativeParent.startsWith(`..${sep}`)) {
+    throw new Error(`unsafe snapshot restore path: ${snapshotPath} / 快照恢复路径不安全`)
+  }
+  let current = root
+  for (const part of relativeParent.split(sep)) {
+    current = resolve(current, part)
+    let stat
+    try {
+      stat = lstatSync(current)
+    } catch (error) {
+      if (isMissingFileError(error)) return
+      throw error
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(`unsafe snapshot restore path: ${snapshotPath} / 快照恢复路径不安全`)
+    }
+  }
+}
+
+interface SnapshotIdOrderKey {
+  category: 0 | 1
+  primary: string
+  sequence: bigint
+  fallback: string
+}
+
+function snapshotIdOrderKey(id: string): SnapshotIdOrderKey {
+  const generated = /^(snapshot-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)(?:-(\d+))?$/
+  const match = generated.exec(id)
+  return match === null
+    ? { category: 1, primary: id, sequence: 0n, fallback: id }
+    : { category: 0, primary: match[1]!, sequence: BigInt(match[2] ?? '0'), fallback: id }
+}
+
+/** @internal Deterministic newest-first order for equal-createdAt documents. */
+export function compareSnapshotIdsNewest(a: string, b: string): number {
+  const aKey = snapshotIdOrderKey(a)
+  const bKey = snapshotIdOrderKey(b)
+  if (aKey.category !== bKey.category) return aKey.category - bKey.category
+  if (aKey.primary !== bKey.primary) return aKey.primary < bKey.primary ? 1 : -1
+  if (aKey.sequence !== bKey.sequence) return aKey.sequence < bKey.sequence ? 1 : -1
+  return aKey.fallback === bKey.fallback ? 0 : aKey.fallback < bKey.fallback ? 1 : -1
+}
+
+function pruneSnapshotsKeeping(profileDir: string, max: number, keepId?: string): string[] {
   const cap = Math.max(1, max)
   const all = listSnapshots(profileDir)
   if (all.length <= cap) return []
-  const dropped = all.slice(cap)
+  // Sequence-suffixed ids can share createdAt. Creation must pin its own id
+  // ahead of that tie so it never returns a snapshot pruning just removed.
+  const ordered = keepId === undefined
+    ? all
+    : [...all.filter(snap => snap.id === keepId), ...all.filter(snap => snap.id !== keepId)]
+  const dropped = ordered.slice(cap)
   for (const snap of dropped) deleteSnapshot(profileDir, snap.id)
   if (dropped.length > 0) {
     logEvent('info', 'snapshot', `pruned ${dropped.length} old snapshot(s) (cap ${cap}): ${dropped.map(s => s.id).join(', ')}`)
@@ -291,7 +349,7 @@ export function createProfileSnapshot(profileDir: string, maxSnapshots: number =
   mkdirSync(snapshotDir(profileDir), { recursive: true, mode: 0o700 })
   writeFileAtomic(snapshotFile(profileDir, id), `${JSON.stringify(snapshot, null, 2)}\n`)
   logEvent('info', 'snapshot', `created ${id} (${files.map(file => file.path).join(', ')})`)
-  pruneSnapshots(profileDir, maxSnapshots)
+  pruneSnapshotsKeeping(profileDir, maxSnapshots, id)
   return snapshot
 }
 
@@ -317,7 +375,7 @@ export function listSnapshots(profileDir: string): ProfileSnapshot[] {
       if (validated.ok && validated.value.snapshot.id === id) snapshots.push(validated.value.snapshot)
     } catch { /* corrupt snapshot — skip */ }
   }
-  return snapshots.sort((a, b) => b.createdAt - a.createdAt)
+  return snapshots.sort((a, b) => b.createdAt - a.createdAt || compareSnapshotIdsNewest(a.id, b.id))
 }
 
 /**
@@ -355,6 +413,22 @@ export function restoreSnapshot(profileDir: string, id: string): { ok: boolean; 
       ? `${JSON.stringify(file.json, null, 2)}\n`
       : Array.isArray(file.lines) ? `${file.lines.join('\n')}` : ''
     let previous: string | null = null
+    // Rollback records bytes, not filesystem object identity. Replacing a
+    // symlink or other non-regular target could not be restored faithfully.
+    try {
+      ensureSafeRestoreParent(profileDir, dirname(target), file.path)
+      if (!lstatSync(target).isFile()) {
+        return {
+          ok: false,
+          restored: [],
+          error: `unsafe restore target is not a regular file: ${file.path} / 恢复目标不是常规文件`,
+        }
+      }
+    } catch (error) {
+      if (!isMissingFileError(error)) {
+        return { ok: false, restored: [], error: error instanceof Error ? error.message : String(error) }
+      }
+    }
     try {
       previous = readFileSync(target, 'utf8')
     } catch (error) {

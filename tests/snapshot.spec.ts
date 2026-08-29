@@ -5,10 +5,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  compareSnapshotIdsNewest,
   createProfileSnapshot,
   deleteSnapshot,
   listSnapshots,
@@ -234,6 +235,53 @@ describe('restoreSnapshot', () => {
     expect(JSON.parse(readFileSync(join(dir, '.dsh-market', 'state.json'), 'utf8'))).toEqual({ disabled: ['later'] })
   })
 
+  it('refuses to replace a live symlink with a regular file', () => {
+    const dir = pdir()
+    writeProfile(dir, SAMPLE_MANIFEST)
+    writeFileSync(join(dir, 'cordis.patch.yml'), SAMPLE_PATCH)
+    const snapshot = createProfileSnapshot(dir)
+    expect(snapshot).not.toBeNull()
+
+    const changedManifest = JSON.stringify({ name: 'changed' }, null, 2)
+    const livePatch = join(tmp, 'live-cordis.patch.yml')
+    writeFileSync(join(dir, 'package.json'), changedManifest)
+    rmSync(join(dir, 'cordis.patch.yml'))
+    writeFileSync(livePatch, 'live patch\n')
+    symlinkSync(livePatch, join(dir, 'cordis.patch.yml'), 'file')
+
+    const result = restoreSnapshot(dir, snapshot?.id ?? '')
+    expect(result.ok).toBe(false)
+    expect(result.restored).toEqual([])
+    expect(result.error).toContain('not a regular file')
+    expect(readFileSync(join(dir, 'package.json'), 'utf8')).toBe(changedManifest)
+    expect(lstatSync(join(dir, 'cordis.patch.yml')).isSymbolicLink()).toBe(true)
+    expect(readFileSync(livePatch, 'utf8')).toBe('live patch\n')
+  })
+
+  it('refuses a parent symlink that redirects a tracked file outside the profile', () => {
+    const dir = pdir()
+    writeProfile(dir, SAMPLE_MANIFEST)
+    mkdirSync(join(dir, '.dsh-market'), { recursive: true })
+    writeFileSync(join(dir, '.dsh-market', 'state.json'), JSON.stringify({ disabled: ['captured'] }))
+    const snapshot = createProfileSnapshot(dir)
+    expect(snapshot).not.toBeNull()
+
+    const changedManifest = JSON.stringify({ name: 'changed' }, null, 2)
+    const outside = join(tmp, 'outside-market')
+    writeFileSync(join(dir, 'package.json'), changedManifest)
+    renameSync(join(dir, '.dsh-market'), outside)
+    writeFileSync(join(outside, 'state.json'), JSON.stringify({ disabled: ['outside'] }))
+    symlinkSync(outside, join(dir, '.dsh-market'), process.platform === 'win32' ? 'junction' : 'dir')
+
+    const result = restoreSnapshot(dir, snapshot?.id ?? '')
+    expect(result.ok).toBe(false)
+    expect(result.restored).toEqual([])
+    expect(result.error).toContain('unsafe snapshot restore path')
+    expect(readFileSync(join(dir, 'package.json'), 'utf8')).toBe(changedManifest)
+    expect(lstatSync(join(dir, '.dsh-market')).isSymbolicLink()).toBe(true)
+    expect(JSON.parse(readFileSync(join(outside, 'state.json'), 'utf8'))).toEqual({ disabled: ['outside'] })
+  })
+
   it('rejects malformed v2 documents before mutating the profile', () => {
     const dir = pdir()
     writeProfile(dir, { name: 'current' })
@@ -436,6 +484,72 @@ describe('pruneSnapshots', () => {
     // The freshly created snapshot is the newest; the newest seed survives.
     expect(remaining.map(s => s.id)).toEqual([snapshot?.id, 'snapshot-seed-25'])
     expect(readdirSync(snapshotsDir(dir)).filter(name => name.endsWith('.json'))).toHaveLength(2)
+  })
+
+  it('keeps the two newest sequence ids across three same-millisecond saves with cap two', () => {
+    const dir = pdir()
+    writeProfile(dir, SAMPLE_MANIFEST)
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-29T12:34:56.789Z'))
+    try {
+      const first = createProfileSnapshot(dir, 2)
+      const second = createProfileSnapshot(dir, 2)
+      const third = createProfileSnapshot(dir, 2)
+      expect(first).not.toBeNull()
+      expect(second).not.toBeNull()
+      expect(third).not.toBeNull()
+      expect(second?.id).not.toBe(first?.id)
+      expect(third?.id).not.toBe(second?.id)
+      expect(listSnapshots(dir).map(snapshot => snapshot.id)).toEqual([third?.id, second?.id])
+      expect(existsSync(join(snapshotsDir(dir), `${third?.id}.json`))).toBe(true)
+      expect(existsSync(join(snapshotsDir(dir), `${second?.id}.json`))).toBe(true)
+      expect(existsSync(join(snapshotsDir(dir), `${first?.id}.json`))).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('orders double-digit same-millisecond sequences numerically before public pruning', () => {
+    const dir = pdir()
+    writeProfile(dir, SAMPLE_MANIFEST)
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-29T12:34:56.789Z'))
+    try {
+      const ids = Array.from({ length: 12 }, () => createProfileSnapshot(dir, 20)?.id ?? '')
+      expect(ids.every(id => id !== '')).toBe(true)
+      expect(listSnapshots(dir).map(snapshot => snapshot.id)).toEqual([...ids].reverse())
+
+      expect(pruneSnapshots(dir, 2)).toEqual(ids.slice(0, -2).reverse())
+      expect(listSnapshots(dir).map(snapshot => snapshot.id)).toEqual(ids.slice(-2).reverse())
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('totally orders mixed equal-time ids across permutations and public pruning', () => {
+    const base = 'snapshot-2026-08-29T12-34-56-789Z'
+    const newest = `${base}-10`
+    const previous = `${base}-9`
+    const nonstandard = `${base}-10x`
+    const permutations = [
+      [newest, previous, nonstandard],
+      [newest, nonstandard, previous],
+      [previous, newest, nonstandard],
+      [previous, nonstandard, newest],
+      [nonstandard, newest, previous],
+      [nonstandard, previous, newest],
+    ]
+
+    for (const [index, ids] of permutations.entries()) {
+      expect([...ids].sort(compareSnapshotIdsNewest)).toEqual([newest, previous, nonstandard])
+
+      const dir = pdir(`mixed-${index}`)
+      writeProfile(dir, SAMPLE_MANIFEST)
+      mkdirSync(snapshotsDir(dir), { recursive: true })
+      for (const id of ids) mkSnapshot(dir, id, 1_000)
+      expect(pruneSnapshots(dir, 2)).toEqual([nonstandard])
+      expect(listSnapshots(dir).map(snapshot => snapshot.id)).toEqual([newest, previous])
+    }
   })
 
   it('prunes oldest-first and returns the dropped ids', () => {
