@@ -449,6 +449,7 @@ registryModule.loadRegistry.mockImplementation(() => Promise.resolve(REGISTRY))
 import { marketVersion, mountMarketRoutes } from '../src/routes.ts'
 import { resolveChannel } from '../src/channels.ts'
 import { profileDir } from '../src/profile.ts'
+import { runDshPlugin } from '../src/dsh-cli.ts'
 import type { AgentsServiceLike } from '../src/agents.ts'
 
 type Handler = (request: unknown, response: unknown) => void | Promise<void>
@@ -1489,6 +1490,8 @@ describe('update flow — no npm publishing required', () => {
       code: 'soft-incompatible',
       rollbackUnavailable: expect.stringMatching(/subpath.*unavailable/i),
     })
+    expect(String(updated.json.compatibility.rollbackUnavailable)).toContain(OLD)
+    expect(String(updated.json.compatibility.rollbackUnavailable)).toContain(' / ')
     expect(updated.json.compatibility.rollbackId).toBeUndefined()
     expect(fake.calls.flat().some(arg => arg.includes(`${OLD}&path:`))).toBe(false)
   })
@@ -1876,9 +1879,42 @@ describe('update flow — no npm publishing required', () => {
     expect(updated.status).toBe(200)
     expect(updated.json.compatibility).toMatchObject({ code: 'soft-incompatible' })
     expect(updated.json.compatibility.rollbackId).toBeUndefined()
-    expect(String(updated.json.compatibility.rollbackUnavailable)).toMatch(/previous installed version is unknown|exact rollback is unavailable/)
+    expect(String(updated.json.compatibility.rollbackUnavailable)).toMatch(/previously installed npm version.*automatic rollback is unavailable/i)
+    expect(String(updated.json.compatibility.rollbackUnavailable)).toContain(' / ')
     const installedAfter = JSON.parse(readFileSync(installedPath, 'utf8')) as { version?: string }
     expect(installedAfter.version).toBe('1.2.0')
+  })
+
+  it('names the previous version when the host cannot execute its exact rollback target', async () => {
+    bed.dispose()
+    bed = createTestbed({}, {
+      runPlugin: runDshPlugin,
+      probePnpm: () => Promise.resolve(true),
+      provisionPnpm: () => Promise.resolve({ ok: true }),
+      cancelActive: () => false,
+      supportsExactRollbackTarget: target => target !== 'dsh-loop@1.0.0',
+    })
+    const hostPeerDir = join(fake.profileDir, 'node_modules', '@deepseek-ai', 'dsh-settings')
+    mkdirSync(hostPeerDir, { recursive: true })
+    writeFileSync(join(hostPeerDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-settings', version: '0.1.0-rc.6' }))
+    fake.npm['dsh-loop'].latest = '1.2.0'
+    fake.npm['dsh-loop'].versions['1.2.0'] = {
+      manifest: {
+        dsh: {}, main: 'lib/index.js',
+        peerDependencies: { '@deepseek-ai/dsh-settings': '^0.1.0-rc.7' },
+      },
+      artifacts: ['lib/index.js'],
+    }
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({ version: '1.2.0' }), { status: 200 })))
+
+    const updated = await bed.dispatch('POST', '/dsh-market/update', { name: 'dsh-loop' })
+
+    expect(updated.status).toBe(200)
+    expect(updated.json.compatibility.rollbackId).toBeUndefined()
+    expect(String(updated.json.compatibility.rollbackUnavailable)).toContain('dsh-loop@1.0.0')
+    expect(String(updated.json.compatibility.rollbackUnavailable)).toContain('v1.0.0')
+    expect(String(updated.json.compatibility.rollbackUnavailable)).toMatch(/host cannot install.*automatic rollback is unavailable/i)
+    expect(String(updated.json.compatibility.rollbackUnavailable)).toContain(' / ')
   })
 
   it('does not offer rollback from a stale npm importer that cannot preserve the manifest range', async () => {
@@ -1908,7 +1944,9 @@ describe('update flow — no npm publishing required', () => {
     expect(updated.status).toBe(200)
     expect(updated.json.compatibility).toMatchObject({ code: 'soft-incompatible' })
     expect(updated.json.compatibility.rollbackId).toBeUndefined()
-    expect(String(updated.json.compatibility.rollbackUnavailable)).toMatch(/lock does not match.*rollback is unavailable/i)
+    expect(String(updated.json.compatibility.rollbackUnavailable)).toMatch(/pnpm-lock\.yaml does not match.*automatic rollback is unavailable/i)
+    expect(String(updated.json.compatibility.rollbackUnavailable)).toContain('v1.0.0')
+    expect(String(updated.json.compatibility.rollbackUnavailable)).toContain(' / ')
   })
 
   it('refuses an update rollback token after an out-of-band profile edit', async () => {
@@ -2022,6 +2060,8 @@ describe('update flow — no npm publishing required', () => {
     expect(updated.json.compatibility).toMatchObject({ code: 'soft-incompatible' })
     expect(updated.json.compatibility.rollbackId).toBeUndefined()
     expect(String(updated.json.compatibility.rollbackUnavailable)).toMatch(/immutable content identity.*unavailable/i)
+    expect(String(updated.json.compatibility.rollbackUnavailable)).toContain('v1.0.0')
+    expect(String(updated.json.compatibility.rollbackUnavailable)).toContain(' / ')
     expect(fake.calls.slice(callsBefore).some(call => call.includes('--force') && call.includes(oldUrl))).toBe(false)
     expect(installedSpec('dsh-prebuilt')).not.toBe(oldUrl)
     expect(readFileSync(join(packageDir, 'index.js'), 'utf8')).toBe('incompatible-registry-bytes')
@@ -2053,6 +2093,8 @@ describe('update flow — no npm publishing required', () => {
     expect(updated.json.compatibility).toMatchObject({ code: 'soft-incompatible' })
     expect(updated.json.compatibility.rollbackId).toBeUndefined()
     expect(String(updated.json.compatibility.rollbackUnavailable)).toMatch(/not a supported exact rollback target/)
+    expect(String(updated.json.compatibility.rollbackUnavailable)).toContain('v1.0.0')
+    expect(String(updated.json.compatibility.rollbackUnavailable)).toContain(' / ')
     expect(fake.calls.slice(callsBefore).flat()).not.toContain('dsh-loop@1.0.0')
   })
 

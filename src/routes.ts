@@ -600,7 +600,11 @@ export function mountMarketRoutes(
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return { ok: true, snapshot: { present: false } }
       }
-      return { ok: false, detail: `the pre-update lockfile could not be read: ${error instanceof Error ? error.message : String(error)}` }
+      const detail = error instanceof Error ? error.message : String(error)
+      return {
+        ok: false,
+        detail: `更新前无法读取 pnpm-lock.yaml，因此自动回滚不可用：${detail} / The pre-update pnpm-lock.yaml could not be read, so automatic rollback is unavailable: ${detail}`,
+      }
     }
   }
 
@@ -2521,17 +2525,31 @@ export function mountMarketRoutes(
             const bundlesBefore = brokenClientBundles(config.profile, activeProfileDir)
             const manifestBefore = manifestCapture.snapshot
             const lockfileCapture = captureProfileLockfile()
+            const previousVersionZh = beforeVersion === null ? '更新前版本未知' : `更新前版本为 v${beforeVersion}`
+            const previousVersionEn = beforeVersion === null ? 'the previous version is unknown' : `the previous version was v${beforeVersion}`
             const rollbackPlan: UpdateRollbackPlan = restore
               ? { available: true, source: { kind: 'manifest' } }
               : !lockfileCapture.ok
                 ? { available: false, detail: lockfileCapture.detail }
                 : isGit
                   ? hasGitSubpath
-                    ? { available: false, detail: 'the previous github source selects a monorepo subpath; exact rollback is unavailable', lockfileBefore: lockfileCapture.snapshot }
+                    ? {
+                        available: false,
+                        detail: `更新前的 GitHub 来源使用 monorepo 子目录${beforeCommit === null ? '' : `（提交 ${beforeCommit}）`}，当前 DSH 命令无法表达该精确目标，因此自动回滚不可用；需要时请手工重新安装该提交。 / The previous GitHub source uses a monorepo subpath${beforeCommit === null ? '' : ` at commit ${beforeCommit}`}; the current DSH command cannot express that exact target, so automatic rollback is unavailable. Reinstall that commit manually if needed.`,
+                        lockfileBefore: lockfileCapture.snapshot,
+                      }
                     : beforeCommit === null
-                      ? { available: false, detail: 'the previous github commit is unknown; exact rollback is unavailable', lockfileBefore: lockfileCapture.snapshot }
+                      ? {
+                          available: false,
+                          detail: '未能确认更新前的 GitHub 提交，因此自动回滚不可用；需要时请从可信来源手工重新安装先前版本。 / The previous GitHub commit could not be verified, so automatic rollback is unavailable. Reinstall the prior version manually from a trusted source if needed.',
+                          lockfileBefore: lockfileCapture.snapshot,
+                        }
                       : gitRollbackTarget === null || !supportsExactRollbackTarget(gitRollbackTarget)
-                        ? { available: false, detail: 'this host cannot execute the exact previous github target; exact rollback is unavailable', lockfileBefore: lockfileCapture.snapshot }
+                        ? {
+                            available: false,
+                            detail: `当前宿主无法安装更新前的精确 GitHub 提交 ${beforeCommit}，因此自动回滚不可用；需要时请手工重新安装该提交。 / This host cannot install the exact previous GitHub commit ${beforeCommit}, so automatic rollback is unavailable. Reinstall that commit manually if needed.`,
+                            lockfileBefore: lockfileCapture.snapshot,
+                          }
                         : {
                             available: true,
                             source: {
@@ -2548,17 +2566,37 @@ export function mountMarketRoutes(
                     // enabled. Re-adding the same URL could bless different
                     // bytes, so restore durable state but never claim an exact
                     // build rollback without a captured content binding.
-                    ? { available: false, detail: 'the previous release archive has no verified immutable content identity; exact rollback is unavailable', lockfileBefore: lockfileCapture.snapshot }
+                    ? {
+                        available: false,
+                        detail: `${previousVersionZh}，但先前的 Release 归档没有经过验证的不可变内容标识；同一链接以后可能返回不同文件，因此自动回滚不可用。需要时请从可信来源手工重新安装${beforeVersion === null ? '先前版本' : ` v${beforeVersion}`}。 / ${previousVersionEn}, but the previous Release archive has no verified immutable content identity; the same URL may later return different bytes, so automatic rollback is unavailable. Reinstall ${beforeVersion === null ? 'the prior version' : `v${beforeVersion}`} manually from a trusted source if needed.`,
+                        lockfileBefore: lockfileCapture.snapshot,
+                      }
                     : isNpmRollbackSource
                       ? beforeVersion === null
-                        ? { available: false, detail: 'the previous installed version is unknown; exact rollback is unavailable', lockfileBefore: lockfileCapture.snapshot }
+                        ? {
+                            available: false,
+                            detail: '未能确认更新前安装的 npm 版本，因此自动回滚不可用；需要时请从可信来源手工重新安装先前版本。 / The previously installed npm version could not be verified, so automatic rollback is unavailable. Reinstall the prior version manually from a trusted source if needed.',
+                            lockfileBefore: lockfileCapture.snapshot,
+                          }
                         : lockfileCapture.snapshot.present
                           && capturedNpmVersion(lockfileCapture.snapshot, name) !== beforeVersion
-                          ? { available: false, detail: 'the pre-update npm lock does not match the installed version; exact rollback is unavailable', lockfileBefore: lockfileCapture.snapshot }
+                          ? {
+                              available: false,
+                              detail: `更新前安装的是 v${beforeVersion}，但 pnpm-lock.yaml 中的版本与它不一致，因此无法证明精确来源，自动回滚不可用。需要时请手工重新安装 ${name}@${beforeVersion}。 / The installed version before the update was v${beforeVersion}, but pnpm-lock.yaml does not match it, so the exact source cannot be proven and automatic rollback is unavailable. Reinstall ${name}@${beforeVersion} manually if needed.`,
+                              lockfileBefore: lockfileCapture.snapshot,
+                            }
                           : !supportsExactRollbackTarget(`${name}@${beforeVersion}`)
-                            ? { available: false, detail: 'this host cannot execute the exact previous npm target; exact rollback is unavailable', lockfileBefore: lockfileCapture.snapshot }
+                            ? {
+                                available: false,
+                                detail: `当前宿主无法安装更新前的精确 npm 目标 ${name}@${beforeVersion}（v${beforeVersion}），因此自动回滚不可用；需要时请手工重新安装该版本。 / This host cannot install the exact previous npm target ${name}@${beforeVersion} (v${beforeVersion}), so automatic rollback is unavailable. Reinstall that version manually if needed.`,
+                                lockfileBefore: lockfileCapture.snapshot,
+                              }
                             : { available: true, source: { kind: 'npm', beforeVersion, lockfileBefore: lockfileCapture.snapshot } }
-                      : { available: false, detail: `the previous source ${spec} is not a supported exact rollback target`, lockfileBefore: lockfileCapture.snapshot }
+                      : {
+                          available: false,
+                          detail: `更新前的来源 ${spec} 不是受支持的精确回滚目标（${previousVersionZh}），因此自动回滚不可用；需要时请从可信来源手工重新安装先前版本。 / The previous source ${spec} is not a supported exact rollback target (${previousVersionEn}), so automatic rollback is unavailable. Reinstall the prior version manually from a trusted source if needed.`,
+                          lockfileBefore: lockfileCapture.snapshot,
+                        }
             const result = await runPlugin(config.profile, addArgs)
             const cancelled = result.cancelled
             const rollbackAttemptBuild = async (): Promise<{ ok: boolean; detail: string | null }> => {
@@ -2763,7 +2801,7 @@ export function mountMarketRoutes(
                     ? { rollbackId }
                     : {
                         rollbackUnavailable: rollbackPlan.available
-                          ? 'the post-update profile state could not be captured; exact rollback is unavailable'
+                          ? `更新完成后无法安全捕获 profile 状态（${previousVersionZh}），因此自动回滚不可用；需要时请从可信来源手工重新安装先前版本。 / The post-update profile state could not be captured safely (${previousVersionEn}), so automatic rollback is unavailable. Reinstall the prior version manually from a trusted source if needed.`
                           : rollbackPlan.detail,
                       }),
                 }
@@ -3748,7 +3786,7 @@ export function mountMarketRoutes(
                   brokenBundles: brokenBundles.length > 0 ? brokenBundles : undefined,
                   ...(rollbackId !== null
                     ? { rollbackId }
-                    : { rollbackUnavailable: 'the post-install profile state could not be captured; rollback is unavailable' }),
+                    : { rollbackUnavailable: '安装完成后无法安全捕获 profile 状态，因此自动回滚不可用；需要时请手工卸载新安装的插件。 / The post-install profile state could not be captured safely, so automatic rollback is unavailable. Remove the newly installed plugin manually if needed.' }),
                 }
                 if (brokenBundles.length > 0) {
                   logEvent('error', 'install-bundle', `${brokenBundles.map(entry => `${entry.name}: ${entry.reason}`).join('; ')}`)

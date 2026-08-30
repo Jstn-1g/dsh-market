@@ -3492,7 +3492,7 @@ export function MarketSection(props: MarketSectionProps) {
           </span>
           <Button variant="outline" size="sm" onClick={() => setTab('diagnostics')}>{t('goDiagnose')}</Button>
           {compatibilityNotice.rollbackId === undefined
-            ? <span>{t('rollbackUnavailable')}</span>
+            ? <span>{compatibilityNotice.rollbackUnavailable ?? t('rollbackUnavailable')}</span>
             : (
                 <Button variant="primary" size="sm" disabled={rollingBack} onClick={() => void doRollback(compatibilityNotice.rollbackId!)}>
                   {rollingBack ? t('rollingBack') : t('rollbackNow')}

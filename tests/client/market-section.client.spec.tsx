@@ -767,6 +767,7 @@ describe('MarketSection (jsdom)', () => {
   })
 
   it('does not offer a rollback action when the server could not capture an exact source', async () => {
+    const rollbackUnavailable = '更新前版本为 v1.0.0，但无法确认精确来源。 / The previous version was v1.0.0, but its exact source could not be verified.'
     const fetchMock = stubFetch({
       '/dsh-market/installed': { profile: 'web', installed: { 'dsh-loop': '^1.0.0' }, live: [] },
       '/dsh-market/updates': { updates: { 'dsh-loop': { kind: 'npm', version: '1.0.0', current: '1.0.0', latest: '1.2.0', updateAvailable: true } } },
@@ -776,7 +777,7 @@ describe('MarketSection (jsdom)', () => {
         compatibility: {
           code: 'soft-incompatible',
           risks: [{ plugin: 'dsh-loop', peer: '@deepseek-ai/dsh-settings', range: '^0.1.0-rc.7', resolved: '0.1.0-rc.6', direction: 'belowMin' }],
-          rollbackUnavailable: 'the previous exact source could not be verified',
+          rollbackUnavailable,
         },
       },
     })
@@ -786,9 +787,32 @@ describe('MarketSection (jsdom)', () => {
     fireEvent.click(await screen.findByRole('button', { name: en.update }))
 
     expect(await screen.findByText(en.compatRiskBannerNoRollback)).toBeTruthy()
-    expect(screen.getByText(en.rollbackUnavailable)).toBeTruthy()
+    expect(screen.getByText(rollbackUnavailable)).toBeTruthy()
+    expect(screen.queryByText(en.rollbackUnavailable)).toBeNull()
     expect(screen.queryByRole('button', { name: en.rollbackNow })).toBeNull()
     expect(fetchMock.mock.calls.some(([url]) => url === '/dsh-market/rollback')).toBe(false)
+  })
+
+  it('falls back to the generic rollback explanation for an older server', async () => {
+    stubFetch({
+      '/dsh-market/installed': { profile: 'web', installed: { 'dsh-loop': '^1.0.0' }, live: [] },
+      '/dsh-market/updates': { updates: { 'dsh-loop': { kind: 'npm', version: '1.0.0', current: '1.0.0', latest: '1.2.0', updateAvailable: true } } },
+      '/dsh-market/update': {
+        ok: true,
+        activation: { 'dsh-loop': { state: 'restart', hot: false, bundle: true, reasons: ['restart to apply'] } },
+        compatibility: {
+          code: 'soft-incompatible',
+          risks: [{ plugin: 'dsh-loop', peer: '@deepseek-ai/dsh-settings', range: '^0.1.0-rc.7', resolved: '0.1.0-rc.6', direction: 'belowMin' }],
+        },
+      },
+    })
+    render(<MarketSection {...props()} />)
+    await screen.findByText('dsh-loop')
+    fireEvent.click(screen.getByRole('button', { name: /Installed/ }))
+    fireEvent.click(await screen.findByRole('button', { name: en.update }))
+
+    expect(await screen.findByText(en.rollbackUnavailable)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: en.rollbackNow })).toBeNull()
   })
 
   it('paginates the discover grid and navigates by page number', async () => {
