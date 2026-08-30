@@ -175,6 +175,28 @@ describe('workspace-root hoisted bundles (#98 review B1)', () => {
   })
 })
 
+describe('shared DSH home resolution', () => {
+  it('does not treat the process directory as home when DSH_HOME is empty', () => {
+    const dir = pdir('blank-home-profile')
+    const cwd = pdir('blank-home-cwd')
+    const previousCwd = process.cwd()
+    writeProfile(dir, { name: 'web-profile', dependencies: {} })
+    mkdirSync(cwd, { recursive: true })
+    writeFileSync(join(cwd, 'cordis.patch.yml'), dump([
+      { insert: [{ id: 'blank-home-trap', name: 'must-not-load' }] },
+    ]))
+    process.env.DSH_HOME = ''
+
+    try {
+      process.chdir(cwd)
+      const report = analyzeProfile(dir, { dshInstallDir: null })
+      expect(report.rows.map(row => row.id)).not.toContain('blank-home-trap')
+    } finally {
+      process.chdir(previousCwd)
+    }
+  })
+})
+
 describe('user patch package resolution (#205)', () => {
   const resolutionErrors = (errors: string[]): string[] =>
     errors.filter(line => line.includes('loader package') || line.includes('loader specifier') || line.includes('has no module name'))
