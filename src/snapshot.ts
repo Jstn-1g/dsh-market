@@ -62,6 +62,10 @@ export interface ProfileSnapshot {
   files: SnapshotFile[]
 }
 
+export type SnapshotCaptureResult =
+  | { ok: true; snapshot: ProfileSnapshot }
+  | { ok: false; error: string }
+
 interface NormalizedSnapshot {
   snapshot: ProfileSnapshot
   files: SnapshotFile[]
@@ -225,11 +229,20 @@ function nextSnapshotId(profileDir: string): string {
 
 /** Default number of snapshots retained; configurable via `maxSnapshots`. */
 export const DEFAULT_MAX_SNAPSHOTS = 20
-export const SNAPSHOT_CAPTURE_ERROR = [
-  'profile composition could not be captured: package.json is missing or unparseable,',
-  'or a tracked composition file is unreadable or invalid /',
-  '无法捕获 profile 组合：package.json 缺失或无法解析，或组合文件无法读取或无效',
-].join(' ')
+function captureError(path: string, reason: string, reasonZh: string): string {
+  return `profile composition could not be captured: ${path} ${reason} / 无法捕获 profile 组合：${path} ${reasonZh}`
+}
+
+function errorCode(error: unknown): string | undefined {
+  if (error === null || typeof error !== 'object' || !('code' in error)) return undefined
+  return typeof error.code === 'string' ? error.code : undefined
+}
+
+function captureReadError(path: string, error: unknown): string {
+  const code = errorCode(error)
+  const suffix = code === undefined ? '' : ` (${code})`
+  return captureError(path, `could not be read${suffix}`, `无法读取${suffix}`)
+}
 
 /**
  * Prune the snapshot directory to the `max` most recent snapshots (newest
@@ -310,32 +323,59 @@ function pruneSnapshotsKeeping(profileDir: string, max: number, keepId?: string)
 
 /**
  * Capture the profile's composition into a version 2 snapshot. Missing
- * optional files are represented explicitly; an existing optional file that
- * cannot be read or parsed makes capture fail. A missing or invalid
- * package.json is not snapshot-able. After creating, the directory is pruned
- * to the most recent `maxSnapshots`.
+ * optional files are represented explicitly. An existing optional file that
+ * cannot be read makes capture fail. Invalid market state is represented as
+ * absent because every state reader already observes it as empty and the next
+ * state write replaces it. A missing, unreadable, or invalid package.json is
+ * not snapshot-able. After creating, the directory is pruned to the most
+ * recent `maxSnapshots`.
  */
-export function createProfileSnapshot(profileDir: string, maxSnapshots: number = DEFAULT_MAX_SNAPSHOTS): ProfileSnapshot | null {
+export function createProfileSnapshot(profileDir: string, maxSnapshots: number = DEFAULT_MAX_SNAPSHOTS): SnapshotCaptureResult {
   const packagePath = join(profileDir, 'package.json')
+  let packageText: string
+  try {
+    packageText = readFileSync(packagePath, 'utf8')
+  } catch (error) {
+    const failure = isTrulyAbsent(packagePath, error)
+      ? captureError('package.json', 'is missing', '缺失')
+      : captureReadError('package.json', error)
+    logEvent('error', 'snapshot', failure)
+    return { ok: false, error: failure }
+  }
   let packageJson: unknown
   try {
-    packageJson = JSON.parse(readFileSync(packagePath, 'utf8'))
+    packageJson = JSON.parse(packageText)
   } catch {
-    return null
+    const failure = captureError('package.json', 'contains invalid JSON', '包含无效 JSON')
+    logEvent('error', 'snapshot', failure)
+    return { ok: false, error: failure }
   }
   const files: SnapshotFile[] = [{ path: 'package.json', json: packageJson }]
   for (const path of SNAPSHOT_FILES.slice(1)) {
     const absolutePath = join(profileDir, path)
+    let text: string
     try {
-      const text = readFileSync(absolutePath, 'utf8')
-      if (path.endsWith('.json')) files.push({ path, json: JSON.parse(text) })
-      else files.push({ path, lines: text.split('\n') })
+      text = readFileSync(absolutePath, 'utf8')
     } catch (error) {
       if (isTrulyAbsent(absolutePath, error)) files.push({ path, absent: true })
       else {
-        logEvent('error', 'snapshot', `could not capture ${path}: ${error instanceof Error ? error.message : String(error)}`)
-        return null
+        const failure = captureReadError(path, error)
+        logEvent('error', 'snapshot', failure)
+        return { ok: false, error: failure }
       }
+      continue
+    }
+    if (path === '.dsh-market/state.json') {
+      try {
+        files.push({ path, json: JSON.parse(text) })
+      } catch {
+        // readMarketState treats malformed state as empty and every state write
+        // replaces it, so absence is the exact observable composition state.
+        files.push({ path, absent: true })
+        logEvent('warn', 'snapshot', `${path} contains invalid JSON; captured as absent because Market reads it as empty`)
+      }
+    } else {
+      files.push({ path, lines: text.split('\n') })
     }
   }
   const id = nextSnapshotId(profileDir)
@@ -350,7 +390,7 @@ export function createProfileSnapshot(profileDir: string, maxSnapshots: number =
   writeFileAtomic(snapshotFile(profileDir, id), `${JSON.stringify(snapshot, null, 2)}\n`)
   logEvent('info', 'snapshot', `created ${id} (${files.map(file => file.path).join(', ')})`)
   pruneSnapshotsKeeping(profileDir, maxSnapshots, id)
-  return snapshot
+  return { ok: true, snapshot }
 }
 
 /**

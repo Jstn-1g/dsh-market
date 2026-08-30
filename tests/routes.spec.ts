@@ -509,15 +509,29 @@ describe('POST /dsh-market/bundle-order', () => {
 
   it('refuses to reorder when the full pre-write composition cannot be captured', async () => {
     writeStandardProfile()
-    mkdirSync(join(dir, '.dsh-market'), { recursive: true })
-    writeFileSync(join(dir, '.dsh-market', 'state.json'), '{ broken')
+    mkdirSync(join(dir, '.dsh-market', 'state.json'), { recursive: true })
     const before = readFileSync(join(dir, 'package.json'), 'utf8')
 
     const res = await hit(routes, '/dsh-market/bundle-order', post('/dsh-market/bundle-order', { order: ['beta', 'alpha'] }))
     expect(res.status).toBe(400)
-    expect(String(jsonBody(res).error)).toMatch(/composition could not be captured/)
+    expect(String(jsonBody(res).error)).toContain('.dsh-market/state.json could not be read')
     expect(readFileSync(join(dir, 'package.json'), 'utf8')).toBe(before)
     expect(existsSync(join(dir, '.dsh-market', 'snapshots'))).toBe(false)
+  })
+
+  it('reorders from malformed optional state and snapshots its observable absence', async () => {
+    writeStandardProfile()
+    mkdirSync(join(dir, '.dsh-market'), { recursive: true })
+    writeFileSync(join(dir, '.dsh-market', 'state.json'), '{ broken')
+
+    const res = await hit(routes, '/dsh-market/bundle-order', post('/dsh-market/bundle-order', { order: ['beta', 'alpha'] }))
+    expect(res.status).toBe(200)
+    const id = String(jsonBody(res).snapshot)
+    const snapshot = JSON.parse(readFileSync(join(dir, '.dsh-market', 'snapshots', `${id}.json`), 'utf8')) as {
+      files: Array<{ path: string; absent?: true }>
+    }
+    expect(snapshot.files).toContainEqual({ path: '.dsh-market/state.json', absent: true })
+    expect(readFileSync(join(dir, '.dsh-market', 'state.json'), 'utf8')).toBe('{ broken')
   })
 
   it('refuses a rule-violating order with 422 + conflicts', async () => {
@@ -703,12 +717,23 @@ describe('GET/POST /dsh-market/snapshots', () => {
 
   it('answers 400 when an existing composition file cannot be captured', async () => {
     writeStandardProfile()
+    mkdirSync(join(dir, 'cordis.patch.yml'))
+
+    const res = await hit(routes, '/dsh-market/snapshots', post('/dsh-market/snapshots', undefined))
+    expect(res.status).toBe(400)
+    expect(String(jsonBody(res).error)).toContain('cordis.patch.yml could not be read')
+  })
+
+  it('captures malformed optional state as absent instead of blocking snapshots', async () => {
+    writeStandardProfile()
     mkdirSync(join(dir, '.dsh-market'), { recursive: true })
     writeFileSync(join(dir, '.dsh-market', 'state.json'), '{ broken')
 
     const res = await hit(routes, '/dsh-market/snapshots', post('/dsh-market/snapshots', undefined))
-    expect(res.status).toBe(400)
-    expect(String(jsonBody(res).error)).toMatch(/composition could not be captured/)
+    expect(res.status).toBe(200)
+    const snapshot = jsonBody(res).snapshot as { files: Array<{ path: string; absent?: true }> }
+    expect(snapshot.files).toContainEqual({ path: '.dsh-market/state.json', absent: true })
+    expect(readFileSync(join(dir, '.dsh-market', 'state.json'), 'utf8')).toBe('{ broken')
   })
 })
 

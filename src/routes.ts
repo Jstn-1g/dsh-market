@@ -31,7 +31,7 @@ import { runningAgentIds, type AgentsLookup } from './agents.ts'
 import { analyzeProfile, type DuplicateName } from './check.ts'
 import { applyBundleOrder, mergeOrder, readBundleRules, readBundleStack, validateOrder } from './order.ts'
 import { applyPreset, deletePreset, listPresets, previewPreset, savePreset } from './presets.ts'
-import { createProfileSnapshot, DEFAULT_MAX_SNAPSHOTS, deleteSnapshot, listSnapshots, restoreSnapshot, SNAPSHOT_CAPTURE_ERROR } from './snapshot.ts'
+import { createProfileSnapshot, DEFAULT_MAX_SNAPSHOTS, deleteSnapshot, listSnapshots, restoreSnapshot } from './snapshot.ts'
 import { trialValidate } from './trial.ts'
 import { codeloadAllowBuildsKey, findCatalogEntryForLocal, findInstalledAlias, githubCommitOfTarget, githubTargetAtCommit, gitAllowBuildsKey, installTargetFor, isLocalSpec, NPM_NAME_RE, repoOfTarget, restoreBlockedByWorkspace, restoreTargetForLocal, workspaceProtocolDeps } from './sources.ts'
 import { failureDetail, groupConflictsByOwner, isStaleUpdate, parseIgnoredBuilds, parsePrepareNotAllowed, RELEASE_AGE_OVERRIDE, retargetCollections, validateAddedPlugins, withHoistRecovery } from './install.ts'
@@ -1335,11 +1335,12 @@ export function mountMarketRoutes(
               // the write (subject to the maxSnapshots quota), so the change is
               // recoverable from the snapshots tab; the in-process backup above
               // stays as the immediate rollback net (double protection).
-              const snapshot = createProfileSnapshot(activeProfileDir, maxSnapshots)
-              if (snapshot === null) {
-                sendJson(response, 400, { error: SNAPSHOT_CAPTURE_ERROR })
+              const captured = createProfileSnapshot(activeProfileDir, maxSnapshots)
+              if (!captured.ok) {
+                sendJson(response, 400, { error: captured.error })
                 return
               }
+              const snapshot = captured.snapshot
               const applied = applyBundleOrder(activeProfileDir, order)
               if (!applied.ok) {
                 sendJson(response, 400, { error: applied.error })
@@ -1450,13 +1451,9 @@ export function mountMarketRoutes(
           }
           try {
             await withMutationLock(response, 'write', async () => {
-              const snapshot = createProfileSnapshot(activeProfileDir, maxSnapshots)
-              sendJson(response, snapshot !== null ? 200 : 400, {
-                ok: snapshot !== null,
-                ...(snapshot !== null
-                  ? { snapshot }
-                  : { error: SNAPSHOT_CAPTURE_ERROR }),
-              })
+              const captured = createProfileSnapshot(activeProfileDir, maxSnapshots)
+              if (captured.ok) sendJson(response, 200, { ok: true, snapshot: captured.snapshot })
+              else sendJson(response, 400, captured)
             })
           } catch (error) {
             sendJson(response, 500, { error: error instanceof Error ? error.message : String(error) })

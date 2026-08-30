@@ -15,6 +15,7 @@ import {
   listSnapshots,
   pruneSnapshots,
   restoreSnapshot,
+  type ProfileSnapshot,
 } from '../src/snapshot.ts'
 
 let tmp: string
@@ -42,6 +43,12 @@ function snapshotsDir(dir: string): string {
   return join(dir, '.dsh-market', 'snapshots')
 }
 
+function mustCreateProfileSnapshot(dir: string, maxSnapshots?: number): ProfileSnapshot {
+  const result = createProfileSnapshot(dir, maxSnapshots)
+  if (!result.ok) throw new Error(result.error)
+  return result.snapshot
+}
+
 const SAMPLE_MANIFEST = {
   name: 'web-profile',
   version: '1.0.0',
@@ -59,41 +66,51 @@ describe('createProfileSnapshot', () => {
     writeFileSync(join(dir, 'cordis.patch.yml'), SAMPLE_PATCH)
     writeFileSync(join(dir, '.dsh-market', 'state.json'), JSON.stringify({ disabled: ['p1'], groups: {}, groupOrder: [] }))
 
-    const snapshot = createProfileSnapshot(dir)
-    expect(snapshot).not.toBeNull()
-    expect(snapshot?.id).toMatch(/^snapshot-/)
-    expect(typeof snapshot?.createdAt).toBe('number')
+    const snapshot = mustCreateProfileSnapshot(dir)
+    expect(snapshot.id).toMatch(/^snapshot-/)
+    expect(typeof snapshot.createdAt).toBe('number')
     // Known composition files, package.json first.
-    expect(snapshot?.files.map(f => f.path)).toEqual(['package.json', 'cordis.patch.yml', '.dsh-market/state.json'])
+    expect(snapshot.files.map(f => f.path)).toEqual(['package.json', 'cordis.patch.yml', '.dsh-market/state.json'])
     // JSON documents keep their parsed form; line-oriented files keep their lines.
-    expect(snapshot?.files[0]?.json).toEqual(SAMPLE_MANIFEST)
-    expect(snapshot?.files[1]?.lines?.join('\n')).toBe(SAMPLE_PATCH)
-    expect(snapshot?.files[2]?.json).toEqual({ disabled: ['p1'], groups: {}, groupOrder: [] })
+    expect(snapshot.files[0]?.json).toEqual(SAMPLE_MANIFEST)
+    expect(snapshot.files[1]?.lines?.join('\n')).toBe(SAMPLE_PATCH)
+    expect(snapshot.files[2]?.json).toEqual({ disabled: ['p1'], groups: {}, groupOrder: [] })
 
     // Persisted under <profile>/.dsh-market/snapshots/<id>.json.
-    const file = join(snapshotsDir(dir), `${snapshot?.id}.json`)
+    const file = join(snapshotsDir(dir), `${snapshot.id}.json`)
     expect(existsSync(file)).toBe(true)
     const stored = JSON.parse(readFileSync(file, 'utf8')) as { id: string; files: { path: string }[] }
-    expect(stored.id).toBe(snapshot?.id)
+    expect(stored.id).toBe(snapshot.id)
     expect(stored.files.map(f => f.path)).toEqual(['package.json', 'cordis.patch.yml', '.dsh-market/state.json'])
   })
 
-  it('returns null when package.json is missing or unparseable', () => {
+  it('names package.json and the concrete reason when capture fails', () => {
     const dir = pdir()
-    expect(createProfileSnapshot(dir)).toBeNull()
+    const missing = createProfileSnapshot(dir)
+    expect(missing).toMatchObject({ ok: false })
+    if (!missing.ok) expect(missing.error).toContain('package.json is missing')
+
     mkdirSync(dir, { recursive: true })
     writeFileSync(join(dir, 'package.json'), '{ nope')
-    expect(createProfileSnapshot(dir)).toBeNull()
+    const invalid = createProfileSnapshot(dir)
+    expect(invalid).toMatchObject({ ok: false })
+    if (!invalid.ok) expect(invalid.error).toContain('package.json contains invalid JSON')
   })
 
-  it('does not mislabel an existing but unparseable optional file as absent', () => {
+  it('captures malformed optional state as absent because Market observes it as empty', () => {
     const dir = pdir()
     writeProfile(dir, SAMPLE_MANIFEST)
     mkdirSync(join(dir, '.dsh-market'), { recursive: true })
     writeFileSync(join(dir, '.dsh-market', 'state.json'), '{ broken')
 
-    expect(createProfileSnapshot(dir)).toBeNull()
-    expect(existsSync(snapshotsDir(dir))).toBe(false)
+    const snapshot = mustCreateProfileSnapshot(dir)
+    expect(snapshot.files).toContainEqual({ path: '.dsh-market/state.json', absent: true })
+    expect(existsSync(join(snapshotsDir(dir), `${snapshot.id}.json`))).toBe(true)
+    expect(readFileSync(join(dir, '.dsh-market', 'state.json'), 'utf8')).toBe('{ broken')
+
+    writeFileSync(join(dir, '.dsh-market', 'state.json'), JSON.stringify({ disabled: ['later'] }))
+    expect(restoreSnapshot(dir, snapshot.id)).toMatchObject({ ok: true })
+    expect(existsSync(join(dir, '.dsh-market', 'state.json'))).toBe(false)
   })
 
   it('does not mislabel an existing but unreadable optional path as absent', () => {
@@ -101,7 +118,13 @@ describe('createProfileSnapshot', () => {
     writeProfile(dir, SAMPLE_MANIFEST)
     mkdirSync(join(dir, 'cordis.patch.yml'))
 
-    expect(createProfileSnapshot(dir)).toBeNull()
+    const result = createProfileSnapshot(dir)
+    expect(result).toMatchObject({ ok: false })
+    if (!result.ok) {
+      expect(result.error).toContain('cordis.patch.yml')
+      expect(result.error).toContain('could not be read')
+      expect(result.error).toContain('(EISDIR)')
+    }
     expect(existsSync(snapshotsDir(dir))).toBe(false)
   })
 
@@ -110,14 +133,16 @@ describe('createProfileSnapshot', () => {
     writeProfile(dir, SAMPLE_MANIFEST)
     symlinkSync(join(dir, 'missing-cordis.patch.yml'), join(dir, 'cordis.patch.yml'), 'file')
 
-    expect(createProfileSnapshot(dir)).toBeNull()
+    const result = createProfileSnapshot(dir)
+    expect(result).toMatchObject({ ok: false })
+    if (!result.ok) expect(result.error).toContain('cordis.patch.yml could not be read')
     expect(existsSync(snapshotsDir(dir))).toBe(false)
   })
 
   it('still snapshots when the optional files are absent', () => {
     const dir = pdir()
     writeProfile(dir, SAMPLE_MANIFEST)
-    const snapshot = createProfileSnapshot(dir)
+    const snapshot = mustCreateProfileSnapshot(dir)
     expect(snapshot).toMatchObject({
       format: 'dsh-market/profile-snapshot',
       version: 2,
@@ -132,9 +157,9 @@ describe('createProfileSnapshot', () => {
   it('assigns distinct ids to consecutive snapshots', () => {
     const dir = pdir()
     writeProfile(dir, SAMPLE_MANIFEST)
-    const a = createProfileSnapshot(dir)
-    const b = createProfileSnapshot(dir)
-    expect(a?.id).not.toBe(b?.id)
+    const a = mustCreateProfileSnapshot(dir)
+    const b = mustCreateProfileSnapshot(dir)
+    expect(a.id).not.toBe(b.id)
     expect(readdirSync(snapshotsDir(dir)).filter(n => n.endsWith('.json'))).toHaveLength(2)
   })
 })
@@ -166,11 +191,11 @@ describe('listSnapshots', () => {
   it('skips corrupt snapshot files', () => {
     const dir = pdir()
     writeProfile(dir, SAMPLE_MANIFEST)
-    const good = createProfileSnapshot(dir)
+    const good = mustCreateProfileSnapshot(dir)
     writeFileSync(join(snapshotsDir(dir), 'snapshot-corrupt.json'), 'not json at all')
 
     const list = listSnapshots(dir)
-    expect(list.map(s => s.id)).toEqual([good?.id])
+    expect(list.map(s => s.id)).toEqual([good.id])
   })
 })
 
@@ -181,15 +206,14 @@ describe('restoreSnapshot', () => {
     mkdirSync(join(dir, '.dsh-market'), { recursive: true })
     writeFileSync(join(dir, 'cordis.patch.yml'), SAMPLE_PATCH)
     writeFileSync(join(dir, '.dsh-market', 'state.json'), JSON.stringify({ disabled: ['p1'], groups: {}, groupOrder: [] }))
-    const snapshot = createProfileSnapshot(dir)
-    expect(snapshot).not.toBeNull()
+    const snapshot = mustCreateProfileSnapshot(dir)
 
     // Mutate all three files after the snapshot was taken.
     writeProfile(dir, { name: 'changed', dsh: { profile: { bundles: ['beta'] } } })
     writeFileSync(join(dir, 'cordis.patch.yml'), '- insert:\n  - id: beta\n    name: beta\n')
     writeFileSync(join(dir, '.dsh-market', 'state.json'), JSON.stringify({ disabled: ['p2'], groups: {}, groupOrder: [] }))
 
-    const result = restoreSnapshot(dir, snapshot?.id ?? '')
+    const result = restoreSnapshot(dir, snapshot.id)
     expect(result.ok).toBe(true)
     expect(result.restored).toEqual(['package.json', 'cordis.patch.yml', '.dsh-market/state.json'])
     expect(JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))).toEqual(SAMPLE_MANIFEST)
@@ -200,13 +224,13 @@ describe('restoreSnapshot', () => {
   it('removes optional composition files created after a v2 snapshot', () => {
     const dir = pdir()
     writeProfile(dir, SAMPLE_MANIFEST)
-    const snapshot = createProfileSnapshot(dir)
+    const snapshot = mustCreateProfileSnapshot(dir)
     writeProfile(dir, { name: 'changed' })
     mkdirSync(join(dir, '.dsh-market'), { recursive: true })
     writeFileSync(join(dir, 'cordis.patch.yml'), '- insert:\n  - id: later\n')
     writeFileSync(join(dir, '.dsh-market', 'state.json'), JSON.stringify({ disabled: ['later'] }))
 
-    const result = restoreSnapshot(dir, snapshot?.id ?? '')
+    const result = restoreSnapshot(dir, snapshot.id)
     expect(result.ok).toBe(true)
     expect(result.restored).toEqual(['package.json', 'cordis.patch.yml', '.dsh-market/state.json'])
     expect(JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))).toEqual(SAMPLE_MANIFEST)
@@ -239,8 +263,7 @@ describe('restoreSnapshot', () => {
     const dir = pdir()
     writeProfile(dir, SAMPLE_MANIFEST)
     writeFileSync(join(dir, 'cordis.patch.yml'), SAMPLE_PATCH)
-    const snapshot = createProfileSnapshot(dir)
-    expect(snapshot).not.toBeNull()
+    const snapshot = mustCreateProfileSnapshot(dir)
 
     const changedManifest = JSON.stringify({ name: 'changed' }, null, 2)
     const livePatch = join(tmp, 'live-cordis.patch.yml')
@@ -249,7 +272,7 @@ describe('restoreSnapshot', () => {
     writeFileSync(livePatch, 'live patch\n')
     symlinkSync(livePatch, join(dir, 'cordis.patch.yml'), 'file')
 
-    const result = restoreSnapshot(dir, snapshot?.id ?? '')
+    const result = restoreSnapshot(dir, snapshot.id)
     expect(result.ok).toBe(false)
     expect(result.restored).toEqual([])
     expect(result.error).toContain('not a regular file')
@@ -263,8 +286,7 @@ describe('restoreSnapshot', () => {
     writeProfile(dir, SAMPLE_MANIFEST)
     mkdirSync(join(dir, '.dsh-market'), { recursive: true })
     writeFileSync(join(dir, '.dsh-market', 'state.json'), JSON.stringify({ disabled: ['captured'] }))
-    const snapshot = createProfileSnapshot(dir)
-    expect(snapshot).not.toBeNull()
+    const snapshot = mustCreateProfileSnapshot(dir)
 
     const changedManifest = JSON.stringify({ name: 'changed' }, null, 2)
     const outside = join(tmp, 'outside-market')
@@ -273,7 +295,7 @@ describe('restoreSnapshot', () => {
     writeFileSync(join(outside, 'state.json'), JSON.stringify({ disabled: ['outside'] }))
     symlinkSync(outside, join(dir, '.dsh-market'), process.platform === 'win32' ? 'junction' : 'dir')
 
-    const result = restoreSnapshot(dir, snapshot?.id ?? '')
+    const result = restoreSnapshot(dir, snapshot.id)
     expect(result.ok).toBe(false)
     expect(result.restored).toEqual([])
     expect(result.error).toContain('unsafe snapshot restore path')
@@ -318,8 +340,7 @@ describe('restoreSnapshot', () => {
     writeProfile(dir, SAMPLE_MANIFEST)
     mkdirSync(join(dir, '.dsh-market'), { recursive: true })
     writeFileSync(join(dir, '.dsh-market', 'state.json'), JSON.stringify({ disabled: ['old'] }))
-    const snapshot = createProfileSnapshot(dir)
-    expect(snapshot).not.toBeNull()
+    const snapshot = mustCreateProfileSnapshot(dir)
 
     const changedManifest = JSON.stringify({ name: 'changed' }, null, 2)
     const changedPatch = 'later patch\n'
@@ -335,7 +356,7 @@ describe('restoreSnapshot', () => {
     vi.spyOn(Date, 'now').mockReturnValue(now)
     vi.spyOn(Math, 'random').mockReturnValue(random)
     try {
-      const result = restoreSnapshot(dir, snapshot?.id ?? '')
+      const result = restoreSnapshot(dir, snapshot.id)
       expect(result.ok).toBe(false)
       expect(readFileSync(join(dir, 'package.json'), 'utf8')).toBe(changedManifest)
       expect(readFileSync(join(dir, 'cordis.patch.yml'), 'utf8')).toBe(changedPatch)
@@ -353,8 +374,7 @@ describe('restoreSnapshot', () => {
     writeProfile(dir, SAMPLE_MANIFEST)
     mkdirSync(join(dir, '.dsh-market'), { recursive: true })
     writeFileSync(join(dir, '.dsh-market', 'state.json'), JSON.stringify({ disabled: ['old'] }))
-    const snapshot = createProfileSnapshot(dir)
-    expect(snapshot).not.toBeNull()
+    const snapshot = mustCreateProfileSnapshot(dir)
 
     const changedManifest = JSON.stringify({ name: 'changed' }, null, 2)
     const changedPatch = 'later patch\n'
@@ -373,7 +393,7 @@ describe('restoreSnapshot', () => {
     vi.spyOn(Date, 'now').mockReturnValue(now)
     vi.spyOn(Math, 'random').mockReturnValue(random)
     try {
-      const result = restoreSnapshot(dir, snapshot?.id ?? '')
+      const result = restoreSnapshot(dir, snapshot.id)
       expect(result.ok).toBe(false)
       expect(result.restored).toEqual([])
       expect(result.error).toContain('rollback incomplete')
@@ -435,11 +455,11 @@ describe('deleteSnapshot', () => {
   it('removes an existing snapshot and returns true', () => {
     const dir = pdir()
     writeProfile(dir, SAMPLE_MANIFEST)
-    const snapshot = createProfileSnapshot(dir)
-    const file = join(snapshotsDir(dir), `${snapshot?.id}.json`)
+    const snapshot = mustCreateProfileSnapshot(dir)
+    const file = join(snapshotsDir(dir), `${snapshot.id}.json`)
     expect(existsSync(file)).toBe(true)
 
-    expect(deleteSnapshot(dir, snapshot?.id ?? '')).toBe(true)
+    expect(deleteSnapshot(dir, snapshot.id)).toBe(true)
     expect(existsSync(file)).toBe(false)
     expect(listSnapshots(dir)).toEqual([])
   })
@@ -477,12 +497,11 @@ describe('pruneSnapshots', () => {
     }
 
     // Creating one more snapshot with cap 2 must drop the 24 oldest seeds.
-    const snapshot = createProfileSnapshot(dir, 2)
-    expect(snapshot).not.toBeNull()
+    const snapshot = mustCreateProfileSnapshot(dir, 2)
 
     const remaining = listSnapshots(dir)
     // The freshly created snapshot is the newest; the newest seed survives.
-    expect(remaining.map(s => s.id)).toEqual([snapshot?.id, 'snapshot-seed-25'])
+    expect(remaining.map(s => s.id)).toEqual([snapshot.id, 'snapshot-seed-25'])
     expect(readdirSync(snapshotsDir(dir)).filter(name => name.endsWith('.json'))).toHaveLength(2)
   })
 
@@ -492,18 +511,15 @@ describe('pruneSnapshots', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-08-29T12:34:56.789Z'))
     try {
-      const first = createProfileSnapshot(dir, 2)
-      const second = createProfileSnapshot(dir, 2)
-      const third = createProfileSnapshot(dir, 2)
-      expect(first).not.toBeNull()
-      expect(second).not.toBeNull()
-      expect(third).not.toBeNull()
-      expect(second?.id).not.toBe(first?.id)
-      expect(third?.id).not.toBe(second?.id)
-      expect(listSnapshots(dir).map(snapshot => snapshot.id)).toEqual([third?.id, second?.id])
-      expect(existsSync(join(snapshotsDir(dir), `${third?.id}.json`))).toBe(true)
-      expect(existsSync(join(snapshotsDir(dir), `${second?.id}.json`))).toBe(true)
-      expect(existsSync(join(snapshotsDir(dir), `${first?.id}.json`))).toBe(false)
+      const first = mustCreateProfileSnapshot(dir, 2)
+      const second = mustCreateProfileSnapshot(dir, 2)
+      const third = mustCreateProfileSnapshot(dir, 2)
+      expect(second.id).not.toBe(first.id)
+      expect(third.id).not.toBe(second.id)
+      expect(listSnapshots(dir).map(snapshot => snapshot.id)).toEqual([third.id, second.id])
+      expect(existsSync(join(snapshotsDir(dir), `${third.id}.json`))).toBe(true)
+      expect(existsSync(join(snapshotsDir(dir), `${second.id}.json`))).toBe(true)
+      expect(existsSync(join(snapshotsDir(dir), `${first.id}.json`))).toBe(false)
     } finally {
       vi.useRealTimers()
     }
@@ -515,7 +531,7 @@ describe('pruneSnapshots', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-08-29T12:34:56.789Z'))
     try {
-      const ids = Array.from({ length: 12 }, () => createProfileSnapshot(dir, 20)?.id ?? '')
+      const ids = Array.from({ length: 12 }, () => mustCreateProfileSnapshot(dir, 20).id)
       expect(ids.every(id => id !== '')).toBe(true)
       expect(listSnapshots(dir).map(snapshot => snapshot.id)).toEqual([...ids].reverse())
 
@@ -571,7 +587,7 @@ describe('pruneSnapshots', () => {
   it('is a no-op when at or under the cap', () => {
     const dir = pdir()
     writeProfile(dir, SAMPLE_MANIFEST)
-    createProfileSnapshot(dir, 5)
+    mustCreateProfileSnapshot(dir, 5)
     expect(pruneSnapshots(dir, 5)).toEqual([])
     expect(pruneSnapshots(dir, 99)).toEqual([])
     expect(listSnapshots(dir)).toHaveLength(1)

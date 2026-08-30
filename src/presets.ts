@@ -15,7 +15,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { readMarketState, writeMarketState } from './hot.ts'
 import { applyBundleOrder, mergeOrder, readBundleRules, readBundleStack, validateOrder } from './order.ts'
-import { createProfileSnapshot, DEFAULT_MAX_SNAPSHOTS, SNAPSHOT_CAPTURE_ERROR } from './snapshot.ts'
+import { createProfileSnapshot, DEFAULT_MAX_SNAPSHOTS } from './snapshot.ts'
 import { trialValidate, type TrialDiff, type TrialIssue } from './trial.ts'
 import { logEvent } from './log.ts'
 
@@ -305,11 +305,12 @@ export function applyPreset(profileDir: string, name: unknown, maxSnapshots: num
   }
 
   const preview = previewPreset(profileDir, name)
-  const snapshot = createProfileSnapshot(profileDir, maxSnapshots)
-  if (snapshot === null) {
-    logEvent('error', 'preset', `apply "${name}" refused: ${SNAPSHOT_CAPTURE_ERROR}`)
-    return { ok: false, error: SNAPSHOT_CAPTURE_ERROR }
+  const captured = createProfileSnapshot(profileDir, maxSnapshots)
+  if (!captured.ok) {
+    logEvent('error', 'preset', `apply "${name}" refused: ${captured.error}`)
+    return { ok: false, error: captured.error }
   }
+  const snapshot = captured.snapshot
   const ordered = applyBundleOrder(profileDir, preset.bundleOrder)
   if (!ordered.ok) {
     return { ok: false, error: ordered.error }

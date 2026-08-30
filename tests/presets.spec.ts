@@ -214,15 +214,33 @@ describe('applyPreset', () => {
     writeBundle(dir, 'alpha', '1.0.0', [{ insert: [{ id: 'alpha-entry', name: 'alpha' }] }])
     writeBundle(dir, 'beta', '1.0.0', [{ insert: [{ id: 'beta-entry', name: 'beta' }] }])
     writePresetFile(dir, [{ name: 'good', bundleOrder: ['beta', 'alpha'], disabled: [], createdAt: 1 }])
-    writeFileSync(join(dir, '.dsh-market', 'state.json'), '{ broken')
+    mkdirSync(join(dir, '.dsh-market', 'state.json'))
     const before = readFileSync(join(dir, 'package.json'), 'utf8')
 
     const result = applyPreset(dir, 'good')
     expect(result.ok).toBe(false)
-    expect(result.error).toMatch(/composition could not be captured/)
+    expect(result.error).toContain('.dsh-market/state.json could not be read')
     expect(readFileSync(join(dir, 'package.json'), 'utf8')).toBe(before)
-    expect(readFileSync(join(dir, '.dsh-market', 'state.json'), 'utf8')).toBe('{ broken')
     expect(existsSync(join(dir, '.dsh-market', 'snapshots'))).toBe(false)
+  })
+
+  it('treats malformed optional state as empty and records its absence before applying', () => {
+    const dir = pdir()
+    writeProfile(dir, ['alpha', 'beta'])
+    writeBundle(dir, 'alpha', '1.0.0', [{ insert: [{ id: 'alpha-entry', name: 'alpha' }] }])
+    writeBundle(dir, 'beta', '1.0.0', [{ insert: [{ id: 'beta-entry', name: 'beta' }] }])
+    writePresetFile(dir, [{ name: 'good', bundleOrder: ['beta', 'alpha'], disabled: ['new-disabled'], createdAt: 1 }])
+    writeFileSync(join(dir, '.dsh-market', 'state.json'), '{ broken')
+
+    const result = applyPreset(dir, 'good')
+    expect(result.ok).toBe(true)
+    const state = JSON.parse(readFileSync(join(dir, '.dsh-market', 'state.json'), 'utf8')) as { disabled: string[] }
+    expect(state.disabled).toEqual(['new-disabled'])
+
+    const snapshot = JSON.parse(readFileSync(join(dir, '.dsh-market', 'snapshots', `${result.snapshot}.json`), 'utf8')) as {
+      files: Array<{ path: string; absent?: true }>
+    }
+    expect(snapshot.files).toContainEqual({ path: '.dsh-market/state.json', absent: true })
   })
 
   it('reports missing presets and invalid names', () => {
