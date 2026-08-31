@@ -223,6 +223,10 @@ describe('a partial write must not erase the rest of the state (#435)', () => {
         disabled: new Set(), groups: {}, groupOrder: [], region: 'china', regionAuto: true,
       })
 
+      // Partial writers still omit the field and must preserve the marker.
+      writeMarketState(dir, { disabled: new Set(['dsh-loop']), groups: {}, groupOrder: [] })
+      expect(readMarketState(dir).regionAuto).toBe(true)
+
       // The manual-region route spreads the current state, changes region,
       // and explicitly clears regionAuto before writing.
       const current = readMarketState(dir)
